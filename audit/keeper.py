@@ -568,20 +568,47 @@ async def main() -> int:
             record(kind="stop", reason="budget", remaining=bud, cycle=cycle)
             break
 
+        log(f"cycle {cycle}: checking for stragglers")
         killed = reap_stragglers()
         if killed:
             log(f"reaped stragglers holding the tuner: {killed}")
             time.sleep(3)
 
-        healed = await heal(log)
-        st = await game_state()
+        # Every phase is bounded AND announced. Measured three times today: a keeper that
+        # is stuck and a keeper that is working look identical from outside, because the
+        # only log lines were "cycle started" and "cycle done". Silence was the failure
+        # mode and silence was never instrumented — the same shape as 25 refused end_turn
+        # calls looking healthy because calls were flowing.
+        log(f"cycle {cycle}: health check")
+        try:
+            healed = await asyncio.wait_for(heal(log), timeout=900)
+        except asyncio.TimeoutError:
+            log(f"cycle {cycle}: heal exceeded 900s - recycling and retrying next cycle")
+            record(kind="cycle", cycle=cycle, healed="heal_timeout", played=None)
+            recycle()
+            continue
+        log(f"cycle {cycle}: healed={healed}; reading state")
+        try:
+            st = await asyncio.wait_for(game_state(), timeout=120)
+        except asyncio.TimeoutError:
+            log(f"cycle {cycle}: game_state timed out - retrying next cycle")
+            record(kind="cycle", cycle=cycle, healed=healed, state="timeout", played=None)
+            time.sleep(15)
+            continue
         if st.get("state") != "in_game":
             log(f"cannot reach an in-game state ({st}) - retrying next cycle")
             record(kind="cycle", cycle=cycle, healed=healed, state=st, played=None)
             time.sleep(30)
             continue
 
-        saved = await checkpoint(leader=st.get("leader"))
+        log(f"cycle {cycle}: checkpointing")
+        try:
+            saved = await asyncio.wait_for(
+                checkpoint(leader=st.get("leader")), timeout=180
+            )
+        except asyncio.TimeoutError:
+            log(f"cycle {cycle}: checkpoint timed out - playing without a fresh save")
+            saved = None
         log(f"cycle {cycle}: turn {st.get('turn')} - checkpoint={saved} - playing "
             f"{args.turns_per_block} turns")
 
