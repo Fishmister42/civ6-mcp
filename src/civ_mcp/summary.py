@@ -128,6 +128,59 @@ async def build_game_summary(gs, concise: bool = False) -> str:
     section("RESEARCH & CIVICS (current + available only)", "tech", nr.narrate_tech_civics)
     section("GOVERNMENT", "policies", nr.narrate_policies)
     section("CITIES & PRODUCTION", "cities", lambda v: nr.narrate_cities(*v))
+
+    # WHAT EACH CITY CAN ACTUALLY BUILD — districts and buildings only.
+    #
+    # The root cause of "we have yet to build a single district". The cities section lists
+    # what is already built and what needs a builder, but never what is BUILDABLE, so the
+    # agent was choosing from memory — and unit names are the ones it reliably knows.
+    # Measured over one block: five production choices, all units (Slinger, Slinger,
+    # Warrior, Settler, Builder), and get_district_advisor never called once. It was not
+    # ignoring districts; it could not see them.
+    #
+    # Units are deliberately omitted: it already builds those without help, and the point
+    # is to surface the categories it is missing rather than to reprint everything.
+    cities_res = results.get("cities")
+    if not isinstance(cities_res, Exception) and cities_res:
+        try:
+            city_list = cities_res[0] if isinstance(cities_res, tuple) else cities_res
+        except Exception:  # noqa: BLE001
+            city_list = []
+        build_lines: list[str] = []
+        for c in list(city_list)[:4]:  # cap: each city is another tuner round-trip
+            cid = getattr(c, "city_id", None)
+            cname = getattr(c, "name", "?")
+            if cid is None:
+                continue
+            try:
+                opts = await asyncio.wait_for(gs.list_city_production(cid), timeout=45)
+            except Exception as exc:  # noqa: BLE001
+                build_lines.append(f"  {cname}: (unavailable: {type(exc).__name__})")
+                continue
+            districts = [o for o in opts if o.category == "DISTRICT" and not o.is_repair]
+            buildings = [o for o in opts if o.category == "BUILDING" and not o.is_repair]
+            if not districts and not buildings:
+                build_lines.append(f"  {cname}: no districts or buildings available")
+                continue
+            build_lines.append(f"  {cname} (id {cid}):")
+            if districts:
+                build_lines.append(
+                    "    DISTRICTS: "
+                    + ", ".join(f"{o.item_name}({o.turns}t)" for o in districts[:8])
+                )
+            if buildings:
+                build_lines.append(
+                    "    BUILDINGS: "
+                    + ", ".join(f"{o.item_name}({o.turns}t)" for o in buildings[:8])
+                )
+        if build_lines:
+            out.append(
+                "\n-- BUILDABLE NOW (districts & buildings) --\n"
+                + "\n".join(build_lines)
+                + "\n  Districts need a target tile: get_district_advisor(city_id) gives "
+                "placement yields, then set_city_production(item_type='DISTRICT', "
+                "target_x=, target_y=)."
+            )
     section("OUR UNITS", "units", nr.narrate_units)
 
     # Settlers and Builders decide the early game and were getting lost in a long unit
