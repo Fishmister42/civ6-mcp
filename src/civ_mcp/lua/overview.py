@@ -722,7 +722,8 @@ def parse_rival_snapshot_response(lines: list[str]) -> list[RivalSnapshot]:
 def build_diary_full_query() -> str:
     """Single InGame round-trip: full per-turn snapshot for diary JSONL.
 
-    Emits per-player lines (all alive major civs, omniscient):
+    Emits per-player lines for the local player and every major civ it has MET
+    (spec-005 R2 — this loop used to run over all alive majors regardless):
         PLAYER|pid|civ|leader|score|cities|pop|sci|cul|gold|goldPT|
               faith|faithPT|favor|favorPT|mil|techsN|civicsN|
               districts|wonders|greatWorks|territory|improvements|
@@ -750,6 +751,7 @@ def build_diary_full_query() -> str:
     return (
         # --- Setup ---
         "local me = Game.GetLocalPlayer() "
+        "local myDiplo = Players[me]:GetDiplomacy() "
         "local eraManager = Game.GetEras() "
         "local eraIdx = eraManager:GetCurrentEra() "
         "local eraEntry = GameInfo.Eras[eraIdx] "
@@ -761,14 +763,10 @@ def build_diary_full_query() -> str:
         "local ownerRevealed = {} "
         "local totalLand = 0 "
         # Build alive-major player list + visibility handles once
-        "local aliveMajors = {} "
-        "local aliveVis = {} "
-        "for i = 0, 62 do "
-        "  if Players[i] and Players[i]:IsMajor() and Players[i]:IsAlive() then "
-        "    aliveMajors[#aliveMajors+1] = i "
-        "    aliveVis[i] = PlayersVisibility[i] "
-        "  end "
-        "end "
+        # spec-005 R2: only the LOCAL player's visibility. Taking
+        # PlayersVisibility[<rival>] let the query report how much of the map each rival
+        # had explored, which no human player can know by any means.
+        "local myVis = PlayersVisibility[me] "
         "for idx = 0, Map.GetPlotCount() - 1 do "
         "  local plot = Map.GetPlotByIndex(idx) "
         "  local owner = plot:GetOwner() "
@@ -781,10 +779,8 @@ def build_diary_full_query() -> str:
         "  if not plot:IsWater() then "
         "    totalLand = totalLand + 1 "
         "    local px, py = plot:GetX(), plot:GetY() "
-        "    for _, pid in ipairs(aliveMajors) do "
-        "      if aliveVis[pid]:IsRevealed(px, py) then "
-        "        ownerRevealed[pid] = (ownerRevealed[pid] or 0) + 1 "
-        "      end "
+        "    if myVis:IsRevealed(px, py) then "
+        "      ownerRevealed[me] = (ownerRevealed[me] or 0) + 1 "
         "    end "
         "  end "
         "end "
@@ -794,9 +790,10 @@ def build_diary_full_query() -> str:
         "for b in GameInfo.Buildings() do hashName[b.Hash] = b.BuildingType end "
         "for d in GameInfo.Districts() do hashName[d.Hash] = d.DistrictType end "
         "for pr in GameInfo.Projects() do hashName[pr.Hash] = pr.ProjectType end "
-        # === Player loop (omniscient — all alive major civs) ===
+        # === Player loop — local player plus civs we have actually MET (spec-005 R2) ===
         "for i = 0, 62 do "
-        "if Players[i] and Players[i]:IsMajor() and Players[i]:IsAlive() then "
+        "if Players[i] and Players[i]:IsMajor() and Players[i]:IsAlive() "
+        "   and (i == me or myDiplo:HasMet(i)) then "
         "  local p = Players[i] "
         "  local cfg = PlayerConfigurations[i] "
         "  local civName = Locale.Lookup(cfg:GetCivilizationShortDescription()) "
@@ -945,8 +942,12 @@ def build_diary_full_query() -> str:
         "    end "
         "  end "
         # --- PLAYER line ---
-        "  local explorePct = totalLand > 0 "
-        "    and math.floor(100 * (ownerRevealed[i] or 0) / totalLand) or 0 "
+        # spec-005 R2: a rival's exploration percentage is not human-obtainable.
+        # -1 is the explicit "not knowable", never a silent 0 that reads as a measurement.
+        "  local explorePct = -1 "
+        "  if i == me and totalLand > 0 then "
+        "    explorePct = math.floor(100 * (ownerRevealed[me] or 0) / totalLand) "
+        "  end "
         '  print("PLAYER|" .. i '
         '    .. "|" .. civName .. "|" .. leaderName '
         '    .. "|" .. sScore .. "|" .. nCities .. "|" .. totalPop '
