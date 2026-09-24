@@ -154,8 +154,23 @@ async def game_state() -> dict:
         await _release(conn)
 
 
-async def checkpoint() -> str | None:
-    """Save through the operator tuner path. Returns the save name, or None."""
+async def checkpoint(attempts: int = 3) -> str | None:
+    """Save through the operator tuner path. Returns the save name, or None.
+
+    Retries: cycle 1 on 2026-09-24 logged checkpoint=None while the very next call
+    played 12 turns fine, so a single attempt lands too close behind the connection
+    _await_in_game just released. A failed checkpoint is not cosmetic — it leaves the
+    keeper reloading a stale save after a crash, silently discarding the turns since.
+    """
+    for attempt in range(attempts):
+        got = await _checkpoint_once()
+        if got:
+            return got
+        await asyncio.sleep(4)
+    return None
+
+
+async def _checkpoint_once() -> str | None:
     from civ_mcp.connection import GameConnection
 
     conn = GameConnection()
