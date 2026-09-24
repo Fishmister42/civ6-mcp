@@ -47,7 +47,13 @@ more than optimal play: the point is to exercise the interface across as much of
 game as you can reach.
 
 Loop, every turn:
-  1. get_game_overview to orient.
+  1. get_game_summary to orient. ONE call gives you yields, research, government, every
+     city and its production, every unit, visible foreign units, resources, diplomacy, and
+     anything blocking end_turn. Do not call get_game_overview / get_units / get_cities /
+     get_tech_civics separately unless you need depth on one of them.
+  1b. get_board_screenshot when the decision is SPATIAL — where to settle, how terrain and
+     borders lie, where units actually are relative to each other. You get the same view a
+     human has. Use it when text is a poor substitute, not every turn.
   2. Look at what is actually actionable — units with moves, cities without production,
      idle research, pending diplomacy, notifications.
   3. ACT. Early game specifically: found your first city with the Settler (use
@@ -345,9 +351,17 @@ async def run(args) -> int:
                             res = await asyncio.wait_for(
                                 session.call_tool(name, raw_args), timeout=args.tool_timeout
                             )
-                            parts = []
+                            parts, images = [], []
                             for c in res.content:
-                                parts.append(getattr(c, "text", "") or f"<{type(c).__name__}>")
+                                if type(c).__name__ == "ImageContent":
+                                    # A tool result must be text on this API, so the image
+                                    # rides in a follow-up user message. Without this the
+                                    # model receives the literal string "<ImageContent>"
+                                    # and the whole screenshot tool is decorative.
+                                    images.append((c.mimeType, c.data))
+                                    parts.append("[board image attached in the next message]")
+                                else:
+                                    parts.append(getattr(c, "text", "") or "")
                             body = "\n".join(parts)
                             if getattr(res, "isError", False):
                                 ok = False
@@ -428,6 +442,16 @@ async def run(args) -> int:
                                 "content": body[: args.result_cap],
                             }
                         )
+                        for mime, data in images:
+                            messages.append({
+                                "role": "user",
+                                "content": [
+                                    {"type": "text",
+                                     "text": "Board view, same as a human sees:"},
+                                    {"type": "image_url",
+                                     "image_url": {"url": f"data:{mime};base64,{data}"}},
+                                ],
+                            })
 
                     if calls_this_turn >= args.calls_per_turn:
                         messages.append(
@@ -478,7 +502,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--turns", type=int, default=10)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--model", default="anthropic/claude-sonnet-4.5")
+    ap.add_argument("--model", default="z-ai/glm-5.3-flash")
     ap.add_argument("--max-steps", type=int, default=400)
     ap.add_argument("--max-seconds", type=float, default=3000)
     ap.add_argument("--tool-timeout", type=float, default=240)

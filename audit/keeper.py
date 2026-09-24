@@ -528,7 +528,7 @@ async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
     ap.add_argument("--turns-per-block", type=int, default=12)
-    ap.add_argument("--model", default="qwen/qwen3-235b-a22b-2507")
+    ap.add_argument("--model", default="z-ai/glm-5.3-flash")
     ap.add_argument("--max-cycles", type=int, default=0, help="0 = until stopped")
     ap.add_argument("--budget-floor", type=float, default=0.25,
                     help="stop when OpenRouter credit falls below this")

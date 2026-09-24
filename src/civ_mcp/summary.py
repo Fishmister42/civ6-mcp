@@ -1,0 +1,205 @@
+"""Turn-start aggregate read, and a board screenshot the agent can actually look at.
+
+Both exist for the same reason: the agent was spending most of its per-turn call budget
+re-reading state one tool at a time before it could decide anything. `get_game_summary`
+collapses that into one call. `get_board_screenshot` gives it the thing a human has and a
+text interface cannot reconstruct — spatial layout at a glance.
+
+Principle I, stated plainly because the screenshot looks like the riskier of the two and is
+actually the safer:
+
+- The summary composes the SAME gated queries the individual tools use. It adds no new read
+  path, so every visibility gate landed in spec-005 R2-R6 carries through automatically. If
+  a query is admissible on its own it is admissible here, and if one is ever found leaking,
+  fixing it fixes both.
+- The screenshot is the player's own window. That is not merely *compatible* with
+  human-parity, it is the definition of it — a person sees exactly these pixels. The hazard
+  is not hidden game state, it is HARNESS state: a FireTuner window, a debug overlay or a
+  console composited into frame. This project has a release-blocking finding about exactly
+  that. So the capture is **gated fail-closed**: a frame that cannot be positively
+  identified as the game's own in-game view is withheld rather than delivered.
+
+Deliberately NOT included in the summary: anything static. The full tech and civic trees,
+the building catalogue, terrain tables. The agent needs what changed, not a fresh copy of
+the rulebook every turn.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import re
+import subprocess
+import time
+from pathlib import Path
+from typing import Any
+
+from civ_mcp import narrate as nr
+
+#: Text that must appear in an OCR of the frame for it to count as the game's own in-game
+#: view. Measured on this host: tesseract reads the top bar and the world tracker reliably.
+_IN_GAME_MARKERS = ("WORLD TRACKER", "CHOOSE RESEARCH", "MELEE STRENGTH", "MOVEMENT")
+#: Text whose presence means we are NOT looking at live gameplay.
+_NOT_IN_GAME = ("SINGLE PLAYER", "LOAD GAME", "JOINS THE", "MAIN MENU")
+#: Harness/debug chrome. Any of these in frame withholds the capture outright.
+_CONTAMINANTS = ("FIRETUNER", "FIRE TUNER", "TUNER", "LUA CONSOLE", "DEBUG MENU")
+
+
+async def _safe(label: str, coro) -> tuple[str, Any]:
+    """Run one sub-query; a failure degrades the section, never the whole summary."""
+    try:
+        return label, await asyncio.wait_for(coro, timeout=60)
+    except Exception as exc:  # noqa: BLE001
+        return label, RuntimeError(f"{type(exc).__name__}: {exc}")
+
+
+async def build_game_summary(gs) -> str:
+    """One turn-start read covering everything dynamic a decision needs.
+
+    Sections degrade independently: `get_game_overview` in particular is flaky on this host
+    (it raises rather than retries when the tuner returns nothing), and a summary that
+    collapsed entirely because one section failed would be worse than the individual tools
+    it replaces.
+    """
+    # SEQUENTIAL, not asyncio.gather. The tuner accepts ONE connection: firing these nine
+    # queries concurrently made them reset each other and every section came back
+    # "ConnectionResetError". Fourth time this single-connection limit has broken something
+    # in this codebase that looked like a logic bug. Concurrency buys nothing here anyway —
+    # the connection is the bottleneck, not the client.
+    results: dict[str, Any] = {}
+    for label, factory in (
+        ("overview", gs.get_game_overview),
+        ("tech", gs.get_tech_civics),
+        ("policies", gs.get_policies),
+        ("cities", gs.get_cities),
+        ("units", gs.get_units),
+        ("resources", gs.get_empire_resources),
+        ("diplomacy", gs.get_diplomacy),
+        ("threats", gs.get_threat_scan),
+        ("sessions", gs.get_diplomacy_sessions),
+    ):
+        k, v = await _safe(label, factory())
+        results[k] = v
+
+    out: list[str] = ["=== TURN SUMMARY ==="]
+
+    def section(title: str, key: str, render) -> None:
+        val = results.get(key)
+        if isinstance(val, Exception):
+            out.append(f"\n-- {title} --\n  (unavailable: {val})")
+            return
+        try:
+            body = render(val)
+        except Exception as exc:  # noqa: BLE001
+            body = f"  (could not render: {type(exc).__name__}: {exc})"
+        out.append(f"\n-- {title} --\n{body}")
+
+    section("STATE", "overview", nr.narrate_overview)
+    section("RESEARCH & CIVICS (current + available only)", "tech", nr.narrate_tech_civics)
+    section("GOVERNMENT", "policies", nr.narrate_policies)
+    section("CITIES & PRODUCTION", "cities", lambda v: nr.narrate_cities(*v))
+    section("OUR UNITS", "units", nr.narrate_units)
+    section("RESOURCES", "resources", nr.narrate_empire_resources)
+    section("DIPLOMACY", "diplomacy", nr.narrate_diplomacy)
+
+    # Threats are visible foreign units near us. The underlying query is visibility-gated;
+    # this adds no new read.
+    threats = results.get("threats")
+    if isinstance(threats, Exception):
+        out.append(f"\n-- VISIBLE FOREIGN UNITS --\n  (unavailable: {threats})")
+    elif not threats:
+        out.append("\n-- VISIBLE FOREIGN UNITS --\n  none in sight")
+    else:
+        lines = [
+            f"  {getattr(t, 'unit_type', '?')} of {getattr(t, 'owner_name', '?')} "
+            f"at ({getattr(t, 'x', '?')},{getattr(t, 'y', '?')})"
+            + (f" — {getattr(t, 'note', '')}" if getattr(t, "note", "") else "")
+            for t in threats
+        ]
+        out.append("\n-- VISIBLE FOREIGN UNITS --\n" + "\n".join(lines))
+
+    # Anything that BLOCKS end_turn belongs at the bottom, where it is read last and acted
+    # on first. A diplomacy session left open is the single most common turn blocker, and a
+    # block once burned 25 consecutive refused end_turn calls without the agent ever
+    # looking for one.
+    sessions = results.get("sessions")
+    if isinstance(sessions, Exception):
+        out.append(f"\n-- TURN BLOCKERS --\n  (unavailable: {sessions})")
+    elif sessions:
+        out.append(
+            "\n-- TURN BLOCKERS --\n"
+            + nr.narrate_diplomacy_sessions(sessions)
+            + "\n  !! An open diplomacy session will REFUSE end_turn. "
+            "Answer it with respond_to_diplomacy before ending the turn."
+        )
+    else:
+        out.append("\n-- TURN BLOCKERS --\n  none detected")
+
+    return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
+# Board screenshot
+# ---------------------------------------------------------------------------
+
+
+def _ocr(path: Path) -> str:
+    try:
+        return subprocess.run(
+            ["tesseract", str(path), "-"], capture_output=True, text=True, timeout=60
+        ).stdout.upper()
+    except Exception:
+        return ""
+
+
+def capture_board(out_dir: Path) -> tuple[Path | None, str]:
+    """Capture the game window. Returns (path, reason-if-withheld).
+
+    Fail-closed. A frame is delivered only when it can be POSITIVELY identified as the
+    game's own in-game view and shows no harness chrome. Everything else is withheld with a
+    reason — including the case where the check itself could not run, because an
+    unverifiable frame is exactly the one that should not reach a model.
+    """
+    try:
+        import sys
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "audit"))
+        from shot import shoot  # type: ignore
+    except Exception as exc:  # noqa: BLE001
+        return None, f"capture unavailable: {type(exc).__name__}: {exc}"
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    raw = out_dir / f"board_{int(time.time())}.png"
+    try:
+        shoot(str(raw))
+    except BaseException as exc:  # noqa: BLE001
+        return None, f"capture failed: {type(exc).__name__}: {exc}"
+
+    # OCR the FULL-RESOLUTION frame — the contamination check must run on every pixel that
+    # was captured, not on a downscale that could blur harness text out of legibility.
+    text = _ocr(raw)
+
+    # Only then downscale for delivery. A 2.7 MB PNG is ~3.6 MB of base64 per turn; at
+    # 1280px JPEG it is roughly 20x smaller and the board is still perfectly readable,
+    # which matters because this is meant to be affordable every turn rather than a treat.
+    path = raw
+    try:
+        from PIL import Image as _PILImage
+
+        im = _PILImage.open(raw).convert("RGB")
+        if im.width > 1280:
+            im = im.resize((1280, round(im.height * 1280 / im.width)), _PILImage.LANCZOS)
+        small = raw.with_suffix(".jpg")
+        im.save(small, "JPEG", quality=80, optimize=True)
+        path = small
+    except Exception:
+        pass  # deliver the PNG rather than nothing
+    if not text:
+        return None, "withheld: frame could not be verified (OCR returned nothing)"
+    for bad in _CONTAMINANTS:
+        if bad in text:
+            return None, f"withheld: harness UI in frame ({bad})"
+    if any(m in text for m in _NOT_IN_GAME):
+        return None, "withheld: not an in-game view (menu or loading screen)"
+    if not (re.search(r"TURN\s*\d+\s*/\s*\d+", text) or any(m in text for m in _IN_GAME_MARKERS)):
+        return None, "withheld: frame does not positively identify as the game board"
+    return path, ""

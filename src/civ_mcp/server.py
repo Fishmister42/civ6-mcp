@@ -30,6 +30,7 @@ from civ_mcp.diary import (
     read_diary_entries as _read_diary_entries,
 )
 from civ_mcp.game_state import GameState
+from civ_mcp import summary as civ_summary
 from civ_mcp.logger import GameLogger
 from civ_mcp.map_capture import MapCapture
 from civ_mcp.spatial import SpatialTracker
@@ -572,6 +573,57 @@ async def get_game_overview(ctx: Context) -> str:
         return text
 
     return await _logged(ctx, "get_game_overview", {}, _run)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def get_game_summary(ctx: Context) -> str:
+    """EVERYTHING dynamic you need to decide a turn, in one call. Start every turn here.
+
+    Replaces calling get_game_overview + get_units + get_cities + get_tech_civics +
+    get_policies + get_empire_resources + get_diplomacy one at a time. Covers: yields and
+    turn, current research and civic with progress, government and policy slots, every city
+    with its production queue, every unit of yours, visible foreign units, empire resources,
+    diplomacy standing, and — last, because you act on it first — anything BLOCKING end_turn.
+
+    Deliberately omits static reference data (full tech/civic trees, building catalogue).
+    You need what changed, not the rulebook. Call the specific tool when you want depth on
+    one thing.
+
+    Sections degrade independently: if one is unavailable the rest still arrive.
+    """
+    gs = _get_game(ctx)
+    return await _logged(
+        ctx, "get_game_summary", {}, lambda: civ_summary.build_game_summary(gs)
+    )
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def get_board_screenshot(ctx: Context) -> Any:
+    """Look at the game board. Returns the actual screen image, same view a human has.
+
+    Use when spatial reasoning matters and text is a poor substitute: judging where to
+    settle, reading terrain and chokepoints, seeing how units and borders actually sit
+    relative to each other, or sanity-checking that the board matches what the tools say.
+
+    This shows exactly what a person sitting at the machine sees — no hidden information,
+    no fog lifted. Frames that cannot be positively verified as the live game board, or
+    that contain any harness or debug interface, are withheld with a reason instead of
+    being returned.
+    """
+    from pathlib import Path as _Path
+
+    from mcp.server.fastmcp import Image
+
+    async def _run():
+        path, why = await asyncio.to_thread(
+            civ_summary.capture_board, _Path("/tmp/civsim_board")
+        )
+        if path is None:
+            return f"No board image available — {why}"
+        return Image(path=str(path))
+
+    # Not routed through _logged: that helper is typed for text results.
+    return await _run()
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
