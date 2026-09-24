@@ -112,28 +112,9 @@ def port_open(host: str = "127.0.0.1", port: int = 4318) -> bool:
 #: reloads rather than playing and checkpointing someone else's game.
 EXPECT_LEADER = os.environ.get("KEEPER_EXPECT_LEADER", "LEADER_CYRUS")
 
-
-async def who_am_i() -> str | None:
-    """Local player's leader type, or None if unreadable."""
-    from civ_mcp.connection import GameConnection
-
-    conn = GameConnection()
-    try:
-        await conn.connect()
-        if conn.gamecore_index is None:
-            return None
-        lines = await conn.execute_read(
-            'local me = Game.GetLocalPlayer(); '
-            'print("LEADER="..tostring(PlayerConfigurations[me]:GetLeaderTypeName()))'
-        )
-        for ln in lines:
-            if "LEADER=" in ln:
-                return ln.split("LEADER=")[1].strip()
-        return None
-    except Exception:
-        return None
-    finally:
-        await _release(conn)
+#: Per-run prefix for cycle directories. Without it a restart reuses cycle-0001 and
+#: Recorder's append mode silently merges two different games into one record.
+RUN_TAG = time.strftime("run-%Y%m%d-%H%M%S")
 
 
 async def _release(conn) -> None:
@@ -168,12 +149,21 @@ async def game_state() -> dict:
         await conn.connect()
         if conn.gamecore_index is None:
             return {"state": "menu"}
-        lines = await conn.execute_read('print("T="..Game.GetCurrentGameTurn())')
-        turn = None
+        lines = await conn.execute_read(
+            'local me = Game.GetLocalPlayer(); '
+            'print("T="..Game.GetCurrentGameTurn()); '
+            'print("LEADER="..tostring(PlayerConfigurations[me]:GetLeaderTypeName()))'
+        )
+        turn, leader = None, None
         for ln in lines:
             if "T=" in ln:
-                turn = int(ln.split("T=")[1].split()[0])
-        return {"state": "in_game", "turn": turn}
+                try:
+                    turn = int(ln.split("T=")[1].split()[0])
+                except ValueError:
+                    pass
+            if "LEADER=" in ln:
+                leader = ln.split("LEADER=")[1].strip()
+        return {"state": "in_game", "turn": turn, "leader": leader}
     except Exception as exc:
         return {"state": "unreachable", "error": f"{type(exc).__name__}: {exc}"[:200]}
     finally:
@@ -182,12 +172,12 @@ async def game_state() -> dict:
         await _release(conn)
 
 
-async def checkpoint(attempts: int = 3) -> str | None:
-    # Never write the checkpoint from a game that is not ours — that is precisely how
-    # the intended save got overwritten.
-    who = await who_am_i()
-    if EXPECT_LEADER and who != EXPECT_LEADER:
-        # Fail closed: an unreadable identity is not permission to overwrite the save.
+async def checkpoint(attempts: int = 3, leader: str | None = None) -> str | None:
+    # Never write the checkpoint from a game that is not ours — that is how the intended
+    # save got overwritten. `leader` comes from the caller's own game_state() read, on the
+    # connection it already opened: re-reading it here needed a second connection, the
+    # tuner allows one, and it returned None nearly every cycle.
+    if EXPECT_LEADER and leader != EXPECT_LEADER:
         return None
 
     """Save through the operator tuner path. Returns the save name, or None.
@@ -445,7 +435,7 @@ async def heal(log) -> str:
         # the intended save — destroying 37 turns of the run it exists to protect
         # (recovered from an autosave). "A game is running" was never the question;
         # "is this OUR game" is.
-        who = await who_am_i()
+        who = st.get("leader")
         if not EXPECT_LEADER:
             return "already_in_game"
         if who == EXPECT_LEADER:
@@ -499,7 +489,7 @@ async def heal(log) -> str:
 
 
 def play_block(out: Path, turns: int, model: str, cycle: int) -> dict:
-    d = out / f"cycle-{cycle:04d}"
+    d = out / f"{RUN_TAG}-cycle-{cycle:04d}"
     d.mkdir(parents=True, exist_ok=True)
     cmd = [
         "uv", "run", "--directory", str(REPO), "python", str(REPO / "audit/minimal_agent.py"),
@@ -577,7 +567,7 @@ async def main() -> int:
             time.sleep(30)
             continue
 
-        saved = await checkpoint()
+        saved = await checkpoint(leader=st.get("leader"))
         log(f"cycle {cycle}: turn {st.get('turn')} - checkpoint={saved} - playing "
             f"{args.turns_per_block} turns")
 
