@@ -1,0 +1,283 @@
+#!/usr/bin/env python3
+"""Build the Cyrus-run paper trail page from the harness's own records.
+
+Input  : <run dir>/tool_calls.jsonl  (reasoning rows + tool_call rows)
+         <run dir>/shots/*.png       (window-scoped captures)
+Output : a single self-contained .html file with screenshots inlined as JPEG data URIs.
+
+Nothing here invents content: every line of reasoning, every command and every
+outcome is read straight out of the run record.
+"""
+from __future__ import annotations
+
+import base64
+import html
+import io
+import json
+import re
+import sys
+from pathlib import Path
+
+RUN = Path(sys.argv[1])
+OUT = Path(sys.argv[2])
+MAXW = int(sys.argv[3]) if len(sys.argv) > 3 else 1000
+
+
+def load_rows():
+    rows = []
+    for line in (RUN / "tool_calls.jsonl").open():
+        line = line.strip()
+        if line:
+            rows.append(json.loads(line))
+    return rows
+
+
+def shot_data_uri(p: Path, maxw: int = MAXW, quality: int = 72) -> str | None:
+    try:
+        from PIL import Image
+
+        im = Image.open(p).convert("RGB")
+        if im.width > maxw:
+            im = im.resize((maxw, round(im.height * maxw / im.width)), Image.LANCZOS)
+        buf = io.BytesIO()
+        im.save(buf, "JPEG", quality=quality, optimize=True)
+        return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+    except Exception as exc:
+        print(f"  [shot] {p.name}: {exc}", file=sys.stderr)
+        return None
+
+
+def collect_shots() -> dict[int, list[tuple[str, str]]]:
+    """turn index -> [(label, data uri)]"""
+    out: dict[int, list[tuple[str, str]]] = {}
+    d = RUN / "shots"
+    if not d.is_dir():
+        return out
+    for p in sorted(d.glob("*.png")):
+        m = re.match(r"endturn_(\d+)", p.stem)
+        if m:
+            turn = int(m.group(1))
+            label = f"end of turn {turn}"
+        else:
+            m2 = re.match(r"t(\d+)_s(\d+)", p.stem)
+            turn = int(m2.group(1)) if m2 else 0
+            label = f"during turn {turn + 1}"
+        uri = shot_data_uri(p)
+        if uri:
+            out.setdefault(turn, []).append((label, uri))
+    return out
+
+
+VERDICT_LABEL = {
+    "applied": "applied",
+    "engine_refused": "refused by engine",
+    "transport_failure": "client unreachable",
+    "mcp_error": "tool error",
+}
+
+
+def fmt_args(a: dict) -> str:
+    if not a:
+        return "()"
+    parts = []
+    for k, v in a.items():
+        s = str(v)
+        if len(s) > 150:
+            s = s[:150] + "…"
+        parts.append(f"{k}={s}")
+    return "(" + ", ".join(parts) + ")"
+
+
+def main() -> None:
+    rows = load_rows()
+    shots = collect_shots()
+
+    # Group steps by the turn they belong to (turns_ended is the count BEFORE this row).
+    turns: dict[int, list[dict]] = {}
+    for r in rows:
+        turns.setdefault(r.get("turns_ended", 0), []).append(r)
+
+    calls = [r for r in rows if r["kind"] == "tool_call"]
+    applied = [r for r in calls if r.get("verdict") == "applied"]
+    ended = [r for r in calls if r["tool"] == "end_turn" and r.get("verdict") == "applied"]
+    action_tools = sorted({r["tool"] for r in applied if not r["tool"].startswith("get_")})
+    all_tools = sorted({r["tool"] for r in calls})
+
+    summary = {}
+    sp = RUN / "summary.json"
+    if sp.exists():
+        summary = json.loads(sp.read_text())
+    model = summary.get("model", "qwen/qwen3-235b-a22b-2507")
+
+    P: list[str] = []
+    A = P.append
+
+    A("<title>Cyrus Through a Tool Port</title>")
+    A(STYLE)
+    A('<div class="wrap">')
+
+    # ---- header -------------------------------------------------------------
+    A('<header class="masthead">')
+    A('<p class="eyebrow">CivSim · spec 005 · MCP harness audit</p>')
+    A("<h1>Cyrus Through a Tool Port</h1>")
+    A(
+        '<p class="dek">A language model plays Civilization VI from turn one with no screen '
+        "and no mouse — only the 76 tool calls a Model Context Protocol server exposes. "
+        "Every word of reasoning, every command and every reply below is lifted verbatim "
+        "from the run record; the screenshots are the game window at the moment they were issued.</p>"
+    )
+    A('<dl class="meta">')
+    for k, v in [
+        ("Leader", "Cyrus · Persia"),
+        ("Setup", "Gathering Storm · Emperor · Online · Pangaea Small · 6 AI · no turn timer"),
+        ("Model", model),
+        ("Interface", "civ6-mcp @ dd20190 over FireTuner :4318"),
+    ]:
+        A(f"<div><dt>{html.escape(k)}</dt><dd>{html.escape(v)}</dd></div>")
+    A("</dl>")
+    A("</header>")
+
+    # ---- stats --------------------------------------------------------------
+    A('<section class="stats" aria-label="Run totals">')
+    for n, label in [
+        (len(ended), "turns ended"),
+        (len(calls), "tool calls"),
+        (len(applied), "applied"),
+        (len(all_tools), "distinct tools"),
+        (len(action_tools), "action tools"),
+    ]:
+        A(f'<div class="stat"><span class="num">{n}</span><span class="lbl">{label}</span></div>')
+    A("</section>")
+
+    # ---- turns --------------------------------------------------------------
+    for t in sorted(turns):
+        steps = turns[t]
+        if not any(s["kind"] == "tool_call" for s in steps):
+            continue
+        A('<section class="turn">')
+        A(f'<h2><span class="tn">Turn {t + 1}</span></h2>')
+
+        for sh_label, uri in shots.get(t, [])[:2]:
+            A('<figure class="shot">')
+            A(f'<img src="{uri}" alt="Civilization VI window, {html.escape(sh_label)}">')
+            A(f"<figcaption>{html.escape(sh_label)}</figcaption>")
+            A("</figure>")
+
+        for s in steps:
+            if s["kind"] == "reasoning":
+                txt = (s.get("text") or "").strip()
+                if txt:
+                    A(f'<blockquote class="think">{html.escape(txt)}</blockquote>')
+            elif s["kind"] == "tool_call":
+                v = s.get("verdict") or ("applied" if s.get("ok") else "mcp_error")
+                A(f'<div class="step {html.escape(v)}">')
+                A(
+                    f'<code class="cmd">{html.escape(s["tool"])}'
+                    f'<span class="args">{html.escape(fmt_args(s.get("args") or {}))}</span></code>'
+                )
+                A(
+                    f'<span class="chip">{html.escape(VERDICT_LABEL.get(v, v))}'
+                    f'<span class="dur">{s.get("duration_s", 0)}s</span></span>'
+                )
+                head = (s.get("result_head") or "").strip()
+                if head:
+                    A(f'<pre class="out">{html.escape(head[:700])}</pre>')
+                A("</div>")
+        A("</section>")
+
+    A(
+        '<footer><p>Generated from <code>tool_calls.jsonl</code> and the run\'s window captures. '
+        "Verdicts are classified from each reply’s own text, because the server returns "
+        "success for game-level refusals — a call that returned is not an action that applied.</p></footer>"
+    )
+    A("</div>")
+
+    OUT.write_text("\n".join(P), encoding="utf-8")
+    kb = OUT.stat().st_size / 1024
+    print(f"wrote {OUT} ({kb:.0f} KB) — {len(ended)} turns, {len(calls)} calls, "
+          f"{sum(len(v) for v in shots.values())} shots")
+
+
+STYLE = """<style>
+:root{
+  --ground:#f4f6f8; --panel:#ffffff; --ink:#131a22; --ink-soft:#4a5665;
+  --rule:#d8dee6; --bronze:#9a6520; --bronze-soft:#f0e4d2;
+  --ok:#276b5e; --ok-bg:#e4f0ec; --warn:#8d4a1e; --warn-bg:#f8e9dd;
+  --bad:#8e2f2a; --bad-bg:#f8e3e1; --mono:#eef1f4;
+  --shadow:0 1px 2px rgba(19,26,34,.06),0 8px 24px -16px rgba(19,26,34,.3);
+}
+@media (prefers-color-scheme:dark){ :root:not([data-theme="light"]){
+  --ground:#0e1319; --panel:#161d26; --ink:#e7ecf2; --ink-soft:#9aa7b6;
+  --rule:#27313d; --bronze:#d29a51; --bronze-soft:#2a2116;
+  --ok:#7fd0bb; --ok-bg:#12271f; --warn:#e0a36a; --warn-bg:#2a1d12;
+  --bad:#eb9a93; --bad-bg:#2b1514; --mono:#101720;
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px -16px rgba(0,0,0,.8);
+}}
+:root[data-theme="dark"]{
+  --ground:#0e1319; --panel:#161d26; --ink:#e7ecf2; --ink-soft:#9aa7b6;
+  --rule:#27313d; --bronze:#d29a51; --bronze-soft:#2a2116;
+  --ok:#7fd0bb; --ok-bg:#12271f; --warn:#e0a36a; --warn-bg:#2a1d12;
+  --bad:#eb9a93; --bad-bg:#2b1514; --mono:#101720;
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px -16px rgba(0,0,0,.8);
+}
+body{background:var(--ground);color:var(--ink);
+  font-family:"IBM Plex Sans",ui-sans-serif,system-ui,sans-serif;line-height:1.55;}
+.wrap{max-width:52rem;margin:0 auto;padding-inline:16px;padding-block:clamp(28px,6vw,64px);}
+.masthead{border-bottom:2px solid var(--ink);padding-bottom:1.6rem;margin-bottom:1.6rem;}
+.eyebrow{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.7rem;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--bronze);margin:0 0 .7rem;}
+h1{font-family:"Spectral",Georgia,serif;font-weight:600;font-size:clamp(2rem,6vw,3.1rem);
+  line-height:1.04;margin:0 0 .6rem;text-wrap:balance;letter-spacing:-.015em;}
+.dek{font-size:1.02rem;color:var(--ink-soft);margin:0 0 1.4rem;max-width:60ch;}
+.meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:.9rem 1.6rem;margin:0;}
+.meta div{display:flex;flex-direction:column;gap:.15rem;}
+.meta dt{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.66rem;
+  letter-spacing:.12em;text-transform:uppercase;color:var(--ink-soft);}
+.meta dd{margin:0;font-size:.9rem;}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(105px,1fr));gap:1px;
+  background:var(--rule);border:1px solid var(--rule);border-radius:3px;
+  overflow:hidden;margin-bottom:2.4rem;}
+.stat{background:var(--panel);padding:.85rem .9rem;display:flex;flex-direction:column;gap:.1rem;}
+.num{font-family:"Spectral",Georgia,serif;font-size:1.7rem;font-weight:600;
+  font-variant-numeric:tabular-nums;line-height:1;}
+.lbl{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.62rem;
+  letter-spacing:.1em;text-transform:uppercase;color:var(--ink-soft);}
+.turn{margin-bottom:2.6rem;}
+.turn h2{margin:0 0 1rem;font-size:.72rem;}
+.tn{font-family:"IBM Plex Mono",ui-monospace,monospace;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--bronze);background:var(--bronze-soft);
+  padding:.32rem .6rem;border-radius:2px;}
+.shot{margin:0 0 1.2rem;}
+.shot img{display:block;width:100%;max-width:100%;border:1px solid var(--rule);border-radius:3px;}
+.shot figcaption{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.66rem;
+  letter-spacing:.08em;text-transform:uppercase;color:var(--ink-soft);margin-top:.45rem;}
+.think{margin:0 0 .9rem;padding:.2rem 0 .2rem 1rem;border-left:2px solid var(--bronze);
+  font-family:"Spectral",Georgia,serif;font-size:1.02rem;color:var(--ink);}
+.step{background:var(--panel);border:1px solid var(--rule);border-radius:3px;
+  padding:.7rem .85rem;margin-bottom:.55rem;box-shadow:var(--shadow);
+  display:grid;grid-template-columns:1fr auto;gap:.45rem .8rem;align-items:start;}
+.step.engine_refused{border-left:3px solid var(--warn);}
+.step.transport_failure,.step.mcp_error{border-left:3px solid var(--bad);}
+.step.applied{border-left:3px solid var(--ok);}
+.cmd{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.8rem;
+  word-break:break-word;min-width:0;}
+.args{color:var(--ink-soft);}
+.chip{justify-self:end;display:flex;flex-direction:column;align-items:flex-end;gap:.1rem;
+  font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.6rem;letter-spacing:.08em;
+  text-transform:uppercase;white-space:nowrap;}
+.applied .chip{color:var(--ok);} .engine_refused .chip{color:var(--warn);}
+.transport_failure .chip,.mcp_error .chip{color:var(--bad);}
+.dur{color:var(--ink-soft);font-variant-numeric:tabular-nums;}
+.out{grid-column:1/-1;margin:.15rem 0 0;background:var(--mono);border-radius:2px;
+  padding:.55rem .65rem;font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.72rem;
+  line-height:1.45;color:var(--ink-soft);white-space:pre-wrap;overflow-x:auto;max-height:15rem;}
+footer{border-top:1px solid var(--rule);padding-top:1.1rem;margin-top:2rem;
+  font-size:.8rem;color:var(--ink-soft);}
+footer code{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.75rem;}
+@media (max-width:520px){ .step{grid-template-columns:1fr;} .chip{justify-self:start;align-items:flex-start;} }
+</style>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Spectral:wght@500;600&display=swap">
+"""
+
+if __name__ == "__main__":
+    main()
