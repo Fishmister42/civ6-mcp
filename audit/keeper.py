@@ -548,7 +548,27 @@ async def heal(log) -> str:
 
     # Wait for the menu on SCREEN. Never poll the port: each bare probe is an aborted
     # handshake, and enough of them wedge the tuner we are trying to bring back.
-    if not wait_for(main_menu_visible, 300, tick=6):
+    #
+    # Watch for EITHER outcome, not just the one we expected. Measured 2026-09-24: this
+    # branch spent 5.5 minutes waiting for a main menu that was never coming, because the
+    # game was already in progress — game_state() had momentarily failed to resolve
+    # GameCore and reported "menu", so heal() went looking for a screen that had already
+    # been left behind. Same mistake as the splash: treating a recognisable screen as a
+    # condition to wait out rather than a state to act on.
+    deadline = time.time() + 300
+    saw_menu = False
+    while time.time() < deadline:
+        txt = screen_text()
+        up = txt.upper()
+        if "SINGLE PLAYER" in up:
+            saw_menu = True
+            break
+        if any(m in up for m in SPLASH_MARKERS) or _looks_in_game(up):
+            log("already past the menu - handing off to the in-game wait")
+            ok_now = await _await_in_game(420, tick=10)
+            return action + ("+already_in_game" if ok_now else "+stuck_past_menu")
+        time.sleep(6)
+    if not saw_menu:
         log("main menu never appeared - will retry next cycle")
         return action + "+no_main_menu"
     log(f"main menu up; loading save '{SAVE_NAME}' via direct clicks")
