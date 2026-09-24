@@ -190,6 +190,25 @@ def click(*names: str, settle: float = 2.5) -> None:
         time.sleep(settle)
 
 
+def main_menu_visible() -> bool:
+    """Is the main menu actually painted? OCR, because the tuner binds long before it.
+
+    Measured 2026-09-24: the tuner accepts connections ~21 s after launch, but the
+    menu renders well after that. A blind sleep before clicking put the clicks on the
+    intro splash and the reload silently did nothing.
+    """
+    try:
+        sys.path.insert(0, str(REPO / "audit"))
+        from shot import shoot as _shoot  # type: ignore
+
+        tmp = "/tmp/civsim_keeper_menu.png"
+        _shoot(tmp)
+        out = sh(["tesseract", tmp, "-"], timeout=45)
+        return "Single Player" in out
+    except BaseException:
+        return False
+
+
 def launch() -> None:
     subprocess.Popen(
         ["setsid", "steam", f"steam://rungameid/{STEAM_APPID}"],
@@ -295,9 +314,11 @@ async def heal(log) -> str:
 
     if not wait_for(port_open, 240):
         return action + "+tuner_never_opened"
-    # The menu renders well after the tuner binds; give it room, then drive the load.
-    time.sleep(35)
-    log(f"loading save '{SAVE_NAME}' via direct clicks")
+    # Wait for the menu to actually be on screen, not for a guessed number of seconds.
+    if not wait_for(main_menu_visible, 240, tick=6):
+        log("main menu never appeared - will retry next cycle")
+        return action + "+no_main_menu"
+    log(f"main menu up; loading save '{SAVE_NAME}' via direct clicks")
     click("single_player", "load_game")
     time.sleep(3)
     click("first_save")
