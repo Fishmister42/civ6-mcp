@@ -108,6 +108,34 @@ def port_open(host: str = "127.0.0.1", port: int = 4318) -> bool:
         return False
 
 
+#: Leader the keeper is minding. A cycle that finds a different leader in progress
+#: reloads rather than playing and checkpointing someone else's game.
+EXPECT_LEADER = os.environ.get("KEEPER_EXPECT_LEADER", "LEADER_CYRUS")
+
+
+async def who_am_i() -> str | None:
+    """Local player's leader type, or None if unreadable."""
+    from civ_mcp.connection import GameConnection
+
+    conn = GameConnection()
+    try:
+        await conn.connect()
+        if conn.gamecore_index is None:
+            return None
+        lines = await conn.execute_read(
+            'local me = Game.GetLocalPlayer(); '
+            'print("LEADER="..tostring(PlayerConfigurations[me]:GetLeaderTypeName()))'
+        )
+        for ln in lines:
+            if "LEADER=" in ln:
+                return ln.split("LEADER=")[1].strip()
+        return None
+    except Exception:
+        return None
+    finally:
+        await _release(conn)
+
+
 async def _release(conn) -> None:
     """Hand the single tuner slot back, whatever the client exposes to do it with."""
     for name in ("disconnect", "close"):
@@ -155,6 +183,13 @@ async def game_state() -> dict:
 
 
 async def checkpoint(attempts: int = 3) -> str | None:
+    # Never write the checkpoint from a game that is not ours — that is precisely how
+    # the intended save got overwritten.
+    who = await who_am_i()
+    if EXPECT_LEADER and who != EXPECT_LEADER:
+        # Fail closed: an unreadable identity is not permission to overwrite the save.
+        return None
+
     """Save through the operator tuner path. Returns the save name, or None.
 
     Retries: cycle 1 on 2026-09-24 logged checkpoint=None while the very next call
@@ -405,7 +440,22 @@ async def heal(log) -> str:
     """Bring the client back to an in-game state. Returns what it did."""
     st = await game_state()
     if st["state"] == "in_game":
-        return "already_in_game"
+        # Which game? Measured 2026-09-24: the keeper was restarted while a DIFFERENT
+        # save was loaded, saw "in_game", played it, and checkpointed it straight over
+        # the intended save — destroying 37 turns of the run it exists to protect
+        # (recovered from an autosave). "A game is running" was never the question;
+        # "is this OUR game" is.
+        who = await who_am_i()
+        if not EXPECT_LEADER:
+            return "already_in_game"
+        if who == EXPECT_LEADER:
+            return "already_in_game"
+        # FAIL CLOSED. who is None when the identity read fails, and the first version
+        # treated that as "carry on" — which is how the wrong game got played and
+        # checkpointed a second time, minutes after the first. A guard that protects
+        # against destroying the run must not pass when it cannot tell.
+        log(f"in game as {who!r}, expected {EXPECT_LEADER} - reloading ours")
+        recycle()
 
     # A cycle can begin on the post-load civ splash: the save is loaded, GameCore is
     # not resolvable yet, so game_state() reads "menu" — and waiting for the MAIN menu
