@@ -146,30 +146,36 @@ def shoot(out: Path, tag: str) -> str | None:
 # naive tally of "calls that returned" overcounts applied actions — the exact
 # failure this project has already shipped once. Classify the body too.
 TRANSPORT_MARKERS = ("Cannot connect to Civ 6", "ConnectionError", "Connection refused")
-REFUSAL_MARKERS = (
-    "WARN:SILENT_FAILURE",
-    "ERR:",
-    "FAILED:",
-    "Error:",
-    "not found",
+
+#: STRUCTURED refusal signals the server emits deliberately. Matched anywhere, because they
+#: are markers rather than prose and mean the same thing wherever they appear.
+#: "Error:" is NOT here: it matches "RuntimeError:", which get_game_summary prints inside a
+#: degraded section, so a 12 KB summary with one failed section read as a total refusal.
+#: These three are distinctive prefixes that do not occur in ordinary narration.
+HARD_REFUSAL = ("WARN:SILENT_FAILURE", "ERR:", "FAILED:")
+
+#: Soft English phrasing that only indicates refusal when it OPENS the reply. Matched in the
+#: first 200 characters only. Scanned over the whole body these produce false positives on
+#: any long narration: get_game_summary returns ~12 KB of correct game state and was being
+#: classified engine_refused because the word "cannot" appears somewhere inside it. That is
+#: not cosmetic — the stall detector counts non-applied verdicts, so a summary called every
+#: turn and always misread would eventually trip an abort on a tool that was working.
+SOFT_REFUSAL = (
+    "Error:", "Error executing", "Empty reflections",
+    "cannot ", "Cannot ", "could not ", "Could not ", "couldn't",
+    "not available", "not possible", "invalid", "Invalid", "not found",
     "No file currently selected",
-    "cannot ",
-    "Cannot ",
-    "could not ",
-    "Could not ",
-    "couldn't",
-    "not available",
-    "not possible",
-    "invalid",
-    "Invalid",
 )
+_SOFT_WINDOW = 200
 
 
 def classify(body: str) -> str:
     """transport_failure | engine_refused | applied — from the narration itself."""
     if any(m in body for m in TRANSPORT_MARKERS):
         return "transport_failure"
-    if any(m in body for m in REFUSAL_MARKERS):
+    if any(m in body for m in HARD_REFUSAL):
+        return "engine_refused"
+    if any(m in body[:_SOFT_WINDOW] for m in SOFT_REFUSAL):
         return "engine_refused"
     return "applied"
 
