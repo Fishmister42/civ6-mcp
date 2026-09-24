@@ -87,6 +87,18 @@ def reap_stragglers() -> list[int]:
 
 
 def port_open(host: str = "127.0.0.1", port: int = 4318) -> bool:
+    """Bare TCP probe. USE SPARINGLY — see below.
+
+    Measured 2026-09-24: this opens a socket and closes it WITHOUT completing the
+    FireTuner handshake. heal() used to call it through wait_for() up to ~80 times per
+    load, and upstream's README states the tuner hangs after a bad handshake and does
+    not recover without a process recycle. That is the wedge the keeper kept
+    diagnosing: it was manufacturing it, one aborted handshake at a time, while the
+    game itself stayed perfectly playable (confirmed at TURN 16/250 with a raw
+    handshake failing).
+
+    Liveness is now judged from the SCREEN, which costs the tuner nothing.
+    """
     import socket
 
     try:
@@ -121,8 +133,6 @@ async def game_state() -> dict:
     """down | menu | in_game, plus the turn when in game."""
     if civ_pid() is None:
         return {"state": "down"}
-    if not port_open():
-        return {"state": "wedged_or_starting"}
     from civ_mcp.connection import GameConnection
 
     conn = GameConnection()
@@ -403,21 +413,12 @@ async def heal(log) -> str:
         log(f"tuner accepts then resets - wedged; recycling ({st.get('error')})")
         recycle()
         action = "recycled_wedge"
-    elif st["state"] == "wedged_or_starting":
-        # Port closed: either still starting up, or gone. Give it a chance first.
-        if not wait_for(port_open, 60):
-            log("port never opened - recycling")
-            recycle()
-            action = "recycled_no_port"
-        else:
-            action = "port_recovered"
     else:
         action = "at_menu"
 
-    if not wait_for(port_open, 240):
-        return action + "+tuner_never_opened"
-    # Wait for the menu to actually be on screen, not for a guessed number of seconds.
-    if not wait_for(main_menu_visible, 240, tick=6):
+    # Wait for the menu on SCREEN. Never poll the port: each bare probe is an aborted
+    # handshake, and enough of them wedge the tuner we are trying to bring back.
+    if not wait_for(main_menu_visible, 300, tick=6):
         log("main menu never appeared - will retry next cycle")
         return action + "+no_main_menu"
     log(f"main menu up; loading save '{SAVE_NAME}' via direct clicks")
