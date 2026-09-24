@@ -376,6 +376,15 @@ def segfault_count() -> int:
 
 
 def budget_remaining() -> float | None:
+    """Headroom on THIS KEY, not the account.
+
+    Corrected 2026-09-24 after the owner caught it. This used /api/v1/credits and returned
+    total_credits - total_usage, which is an ACCOUNT-WIDE figure covering every key ever
+    issued: it read $2.25 while this key had $31.86 left of its $80 limit. The keeper was
+    therefore minutes from halting itself on a budget it was not spending. /api/v1/key
+    reports limit_remaining for the key actually in use, which is the only number that
+    governs whether the next request is allowed.
+    """
     try:
         import httpx
         import yaml
@@ -384,10 +393,15 @@ def budget_remaining() -> float | None:
             SECRETS.read_text()
         ).get("openrouter_api_key")
         d = httpx.get(
-            "https://openrouter.ai/api/v1/credits",
+            "https://openrouter.ai/api/v1/key",
             headers={"Authorization": f"Bearer {key}"}, timeout=25,
         ).json()["data"]
-        return float(d["total_credits"]) - float(d["total_usage"])
+        rem = d.get("limit_remaining")
+        if rem is not None:
+            return float(rem)
+        # A key with no limit set is bounded only by the account; treat as ample rather
+        # than as zero, because returning 0 here would stop the keeper on a null field.
+        return float("inf")
     except Exception:
         return None
 

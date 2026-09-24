@@ -69,6 +69,10 @@ Rules:
   load_save_from_menu. The game is already loaded.
 - Keep your reasoning brief. Spend your budget on tool calls, not prose.
 - If a turn is done, end it. Do not stall.
+- If end_turn is REFUSED, something is blocking the turn and calling it again will not help.
+  Read the refusal: it names the blocker. A diplomacy prompt needs get_pending_diplomacy and
+  then respond_to_diplomacy. Units awaiting orders need skip_remaining_units. Never call the
+  same tool a third time after two identical refusals.
 """
 
 BANNED = {
@@ -236,6 +240,13 @@ async def run(args) -> int:
     shots = 0
     transport_failures = 0
     calls_this_turn = 0
+    # Repeat detector. Measured 2026-09-24: a block burned 25 consecutive end_turn calls,
+    # every one engine_refused on the same Babylon diplomacy blocker, ~6 s apart, while the
+    # agent narrated "diplomacy deadlock continues" each time. From outside the cycle looked
+    # healthy — calls were flowing and nothing errored. This repo's git log opens with the
+    # same shape: "a loop that succeeds ran 158 times unchecked".
+    last_signature: tuple[str, str] | None = None
+    repeat_count = 0
 
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
@@ -366,6 +377,31 @@ async def run(args) -> int:
                         )
                         if verdict != "applied":
                             print(f"        -> {(err or body)[:200]}")
+                        signature = (name, verdict)
+                        if signature == last_signature:
+                            repeat_count += 1
+                        else:
+                            last_signature, repeat_count = signature, 1
+
+                        if verdict != "applied" and repeat_count == 3:
+                            messages.append({
+                                "role": "user",
+                                "content": (
+                                    f"STOP. You have called {name} {repeat_count} times in a row "
+                                    f"and it was refused every time. Repeating it will not work. "
+                                    "The refusal text names the blocker — read it. If a diplomacy "
+                                    "prompt is blocking the turn, call get_pending_diplomacy and "
+                                    "then respond_to_diplomacy to clear it. If a unit needs orders, "
+                                    "use skip_remaining_units. Do something DIFFERENT."
+                                ),
+                            })
+                        if verdict != "applied" and repeat_count >= 8:
+                            print(f"[abort] {name} refused {repeat_count} times running — stopping")
+                            rec.record(kind="abort", reason="repeat_refusal",
+                                       tool=name, count=repeat_count, step=step)
+                            shoot(out, f"stalled_{step:03d}")
+                            return finish(args, rec, started, turns_ended, shots)
+
                         if verdict == "transport_failure":
                             transport_failures += 1
                             if transport_failures >= 3:
