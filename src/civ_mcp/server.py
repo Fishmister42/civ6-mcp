@@ -2698,29 +2698,6 @@ async def dismiss_popup(ctx: Context) -> str:
     return await _logged(ctx, "dismiss_popup", {}, gs.dismiss_popup)
 
 
-@mcp.tool(annotations={"destructiveHint": True})
-async def run_lua(ctx: Context, code: str, context: str = "gamecore") -> str:
-    """Run arbitrary Lua code in the game. Advanced escape hatch — prefer built-in tools.
-
-    Args:
-        code: Lua code to execute. Use print() for output, end with print("---END---").
-        context: "gamecore" (default) for read-only state queries.
-                 "ingame" for commands and UI-dependent queries.
-
-    Context differences:
-      gamecore: Players[], GameInfo.*, Map.*, Game.* — safe read-only access.
-                CANNOT use: UI.*, UnitManager.*, CityManager.*, notifications.
-      ingame:   All APIs including UI.*, UnitManager.*, CityManager.*.
-                Use for: moving units, setting research, diplomacy actions.
-
-    Always use print() for output (not return).
-    """
-    gs = _get_game(ctx)
-    return await _logged(
-        ctx, "run_lua", {"context": context}, lambda: gs.execute_lua(code, context)
-    )
-
-
 # ---------------------------------------------------------------------------
 # Save / Load
 # ---------------------------------------------------------------------------
@@ -2916,8 +2893,5 @@ def main():
         signal.signal(
             signal.SIGTERM, lambda sig, frame: os.kill(os.getpid(), signal.SIGINT)
         )
-
-    if os.environ.get("CIV_MCP_DISABLE_LUA"):
-        mcp._tool_manager.remove_tool("run_lua")
 
     mcp.run(transport="stdio")

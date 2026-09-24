@@ -31,12 +31,28 @@ async def main():
                 return "\n".join(getattr(c, "text", "") or "" for c in res.content)
 
             async def turn_now():
+                """Independent read-back of the game's own turn counter.
+
+                Was `run_lua`, which spec-005 R1 deletes as a Principle I violation.
+                Now goes through get_game_overview — the only remaining read tool that
+                reports the turn. That tool is itself flaky on this host (it raises
+                rather than retries when the tuner returns nothing), so retry a few
+                times and return None rather than guessing. A None is recorded as
+                "unknown", never as "unchanged": the point of this read is that it is
+                independent of end_turn's own claim.
+                """
                 import re
-                body = await call("run_lua", {
-                    "code": 'print("TURNIS="..Game.GetCurrentGameTurn())\nprint("---END---")',
-                    "context": "gamecore"})
-                m = re.search(r"TURNIS=(\d+)", body)
-                return int(m.group(1)) if m else None
+
+                for _ in range(3):
+                    try:
+                        body = await call("get_game_overview")
+                    except Exception:
+                        body = ""
+                    m = re.search(r"Turn\s+(\d+)", body)
+                    if m:
+                        return int(m.group(1))
+                    await asyncio.sleep(2)
+                return None
 
             start = await turn_now()
             print(f"start turn: {start}")

@@ -52,7 +52,7 @@ CLICK = {
 }
 
 
-def sh(cmd: list[str], timeout: int = 30) -> str:
+def sh(cmd: list[str], timeout: int = 45) -> str:
     try:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
     except Exception:
@@ -172,12 +172,21 @@ def click(*names: str, settle: float = 2.5) -> None:
     if not wid:
         return
     w = wid[-1]
-    subprocess.run(["xdotool", "windowactivate", w], capture_output=True, timeout=15)
+    try:
+        subprocess.run(["xdotool", "windowactivate", w], capture_output=True, timeout=45)
+    except Exception:
+        pass
     time.sleep(1)
     for n in names:
         x, y = CLICK[n]
-        subprocess.run(["xdotool", "mousemove", str(x), str(y), "click", "1"],
-                       capture_output=True, timeout=15)
+        # Measured 2026-09-24: xdotool blocks well past 15 s while the client is
+        # loading and the X server is busy. A TimeoutExpired here aborted the whole
+        # heal, so the keeper reported reload_failed on a client that was fine.
+        try:
+            subprocess.run(["xdotool", "mousemove", str(x), str(y), "click", "1"],
+                           capture_output=True, timeout=45)
+        except Exception:
+            pass
         time.sleep(settle)
 
 
@@ -264,13 +273,21 @@ async def heal(log) -> str:
         log("client down - launching")
         launch()
         action = "launched"
-    elif st["state"] in ("wedged_or_starting", "unreachable"):
-        # The tuner can stop accepting while Civ6 is still alive. Upstream's README
-        # says the same: it will not recover until the process is recycled.
+    elif st["state"] == "unreachable":
+        # THE WEDGE SIGNATURE. The wedged tuner still ACCEPTS the TCP connection and
+        # then resets it on handshake, so port_open() reads healthy throughout and a
+        # port-wait never fires the recycle. Measured 2026-09-24: repeated
+        # ConnectionResetError with Civ6 alive, port 4318 accepting, and the game
+        # visibly in progress on screen. Only a process recycle clears it.
+        log(f"tuner accepts then resets - wedged; recycling ({st.get('error')})")
+        recycle()
+        action = "recycled_wedge"
+    elif st["state"] == "wedged_or_starting":
+        # Port closed: either still starting up, or gone. Give it a chance first.
         if not wait_for(port_open, 60):
-            log("tuner not accepting with process alive - recycling")
+            log("port never opened - recycling")
             recycle()
-            action = "recycled"
+            action = "recycled_no_port"
         else:
             action = "port_recovered"
     else:
