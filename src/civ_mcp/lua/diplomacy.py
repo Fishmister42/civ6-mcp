@@ -18,6 +18,14 @@ from civ_mcp.lua.models import (
 )
 
 
+#: Diplomatic visibility level at or above which a rival's aggregate stats (military
+#: strength, total city count) may be disclosed. 3 == "Secret", the level the candidate's
+#: own hidden-agenda gate names in its output. Verified only that level 1 ("Limited")
+#: shows neither figure in-client; the exact game threshold above that is unverified, so
+#: this withholds rather than guesses. See evidence/remediations/diplo-visibility-parity.md
+_VIS_FOR_RIVAL_STATS = 3
+
+
 def build_diplomacy_query() -> str:
     """Rich diplomacy query — runs in InGame context for GetDiplomaticAI access."""
     return """
@@ -44,9 +52,21 @@ for i = 0, 62 do
             local theyDel = Players[i]:GetDiplomacy():HasDelegationAt(me) and "1" or "0"
             local theyEmb = Players[i]:GetDiplomacy():HasEmbassyAt(me) and "1" or "0"
             print("CIV|" .. i .. "|" .. civName .. "|" .. leaderName .. "|" .. met .. "|" .. war .. "|" .. stateName .. "|" .. grievances .. "|" .. vis .. "|" .. hasDel .. "|" .. hasEmb .. "|" .. theyDel .. "|" .. theyEmb)
+            -- spec-005 R3. Measured in-client 2026-09-24 (evidence/remediations/
+            -- diplo-visibility-parity.md): at Access Level "Limited", Civilization VI's own
+            -- Intel Report shows government, relationship and agendas and does NOT show a
+            -- rival's military strength or city count. This query printed both regardless,
+            -- while gating agendas on the very handle four lines above (`vis`). The defect
+            -- was never a missing capability, only a boundary applied in one place and not
+            -- its neighbours.
+            -- Threshold: the same level the candidate's own hidden-agenda gate uses. Only
+            -- "Limited" was observed directly, so this errs toward withholding, per the
+            -- constitution's "block rather than ship with a caveat".
             local okMil, milStr = pcall(function() return Players[i]:GetStats():GetMilitaryStrength() end)
             local okMyMil, myMilStr = pcall(function() return Players[me]:GetStats():GetMilitaryStrength() end)
-            if okMil and okMyMil then print("MILITARY|" .. i .. "|" .. (milStr or 0) .. "|" .. (myMilStr or 0)) end
+            if okMil and okMyMil and vis >= 3 then  -- _VIS_FOR_RIVAL_STATS
+                print("MILITARY|" .. i .. "|" .. (milStr or 0) .. "|" .. (myMilStr or 0))
+            end
             local nCivCities = 0
             for _, ec in Players[i]:GetCities():Members() do
                 nCivCities = nCivCities + 1
@@ -71,7 +91,13 @@ for i = 0, 62 do
                     print("ECITY|" .. i .. "|" .. ecName:gsub("|","/") .. "|" .. ecx .. "," .. ecy .. "|" .. ecPop .. "|" .. string.format("%.0f|%.1f", ecLoy, ecLoyPT) .. "|" .. ecWalls .. "|" .. ecDef)
                 end
             end
-            print("CIVCITIES|" .. i .. "|" .. nCivCities)
+            -- spec-005 R3: the TOTAL is withheld below the same threshold. The per-city
+            -- ECITY lines are already gated on pVis:IsRevealed and stay as they are; it was
+            -- always only the count that leaked, which is what made "Cities: 6 (all in fog)"
+            -- possible — a number whose own narration says none of it has been seen.
+            if vis >= 3 then  -- _VIS_FOR_RIVAL_STATS
+                print("CIVCITIES|" .. i .. "|" .. nCivCities)
+            end
             local mods = ai:GetDiplomaticModifiers(me)
             if mods then
                 for _, mod in ipairs(mods) do

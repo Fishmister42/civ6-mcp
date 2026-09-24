@@ -736,13 +736,26 @@ def narrate_diplomacy(civs: list[lq.CivInfo]) -> str:
                     city_parts.append(
                         f"{vc.name} pop {vc.population} ({vc.x},{vc.y}){walls_str}{loy_warn}"
                     )
-                hidden = c.num_cities - len(c.visible_cities)
-                fog_str = f" + {hidden} in fog" if hidden > 0 else ""
-                lines.append(
-                    f"    Cities ({c.num_cities}): {'; '.join(city_parts)}{fog_str}"
-                )
-            else:
+                # spec-005 R3: num_cities is withheld below the visibility threshold and
+                # arrives as 0. A living civ we have MET always has at least one city, so 0
+                # here means "not disclosed", never "they have none". Say unknown rather
+                # than printing a number that is false — replacing a leak with a
+                # confident wrong figure would be the worse trade.
+                if c.num_cities > 0:
+                    hidden = c.num_cities - len(c.visible_cities)
+                    fog_str = f" + {hidden} in fog" if hidden > 0 else ""
+                    lines.append(
+                        f"    Cities ({c.num_cities}): {'; '.join(city_parts)}{fog_str}"
+                    )
+                else:
+                    lines.append(
+                        f"    Cities ({len(city_parts)} seen, total unknown): "
+                        f"{'; '.join(city_parts)}"
+                    )
+            elif c.num_cities > 0:
                 lines.append(f"    Cities: {c.num_cities} (all in fog)")
+            else:
+                lines.append("    Cities: none seen, total unknown")
         # Military strength comparison
         if c.military_strength > 0:
             # Find our military strength from the MILITARY line (stored per-civ parse)
