@@ -68,8 +68,8 @@ def shot_data_uri(p: Path, maxw: int = MAXW, quality: int = 72) -> str | None:
         return None
 
 
-def collect_shots() -> dict[int, list[tuple[str, str]]]:
-    """turn index -> [(label, data uri)], across every run, offset the same way."""
+def collect_shots() -> dict[int, list[tuple[int, str, str]]]:
+    """turn index -> [(order, label, data uri)], across every run, offset the same way."""
     out: dict[int, list[tuple[str, str]]] = {}
     base = 0
     for rd in RUNS:
@@ -84,22 +84,31 @@ def collect_shots() -> dict[int, list[tuple[str, str]]]:
     return out
 
 
-def _collect_one(rd: Path, out: dict, base: int) -> None:
+def _collect_one(rd: Path, out: dict, base: int) -> None:  # noqa: C901
     d = rd / "shots"
     if not d.is_dir():
         return
     for p in sorted(d.glob("*.png")):
         m = re.match(r"endturn_(\d+)", p.stem)
         if m:
-            turn = int(m.group(1)) + base
-            label = f"end of turn {turn}"
+            # endturn_NNN is captured right AFTER turns_ended becomes NNN, so it belongs
+            # to the section for the turn that just ENDED — key NNN-1, since sections are
+            # keyed by turns_ended BEFORE the row and headed "Turn key+1". Filing it at
+            # NNN put every end-of-turn frame one section late, so each turn appeared to
+            # open with the previous turn's result.
+            n = int(m.group(1)) + base
+            turn = n - 1
+            label = f"end of turn {n}"
+            order = 1
         else:
             m2 = re.match(r"t(\d+)_s(\d+)", p.stem)
             turn = (int(m2.group(1)) if m2 else 0) + base
+            step = int(m2.group(2)) if m2 else 0
             label = f"during turn {turn + 1}"
+            order = 0
         uri = shot_data_uri(p)
         if uri:
-            out.setdefault(turn, []).append((label, uri))
+            out.setdefault(turn, []).append((order, label, uri))
 
 
 REFLECTION_FIELDS = ("tactical", "strategic", "tooling", "planning", "hypothesis")
@@ -193,7 +202,9 @@ def main() -> None:
         A('<section class="turn">')
         A(f'<h2><span class="tn">Turn {t + 1}</span></h2>')
 
-        for sh_label, uri in shots.get(t, [])[:2]:
+        # "during" frames first, then the end-of-turn frame; cap at 4 rather than 2 so a
+        # turn with several interval captures does not silently lose them.
+        for _o, sh_label, uri in sorted(shots.get(t, []))[:4]:
             A('<figure class="shot">')
             A(f'<img src="{uri}" alt="Civilization VI window, {html.escape(sh_label)}">')
             A(f"<figcaption>{html.escape(sh_label)}</figcaption>")

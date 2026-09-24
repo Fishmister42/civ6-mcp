@@ -32,13 +32,23 @@ from civ_mcp.lua.models import (
 
 _SETTLE_PREAMBLE = (
     """
+-- spec-005 R6: the subtlest of the six leaks, because it never prints anything.
+-- allCities was every city of every living player, and _SETTLE_SCORE_BODY marks a
+-- candidate tooClose if it sits within 3 tiles of ANY of them. So the advisor quietly
+-- steered away from cities the player had never seen, and the leak travelled in the
+-- SHAPE of the recommendation rather than in its text. A human gets that refusal only
+-- on attempting to found, which is how they learn something is there.
+-- Both callers define `me` and `vis` above this fragment.
 local allCities = {}
 for i = 0, 62 do
     if Players[i] and Players[i]:IsAlive() then
         local cities = Players[i]:GetCities()
         if cities then
             for _, c in cities:Members() do
-                table.insert(allCities, {x=c:GetX(), y=c:GetY()})
+                local ccx, ccy = c:GetX(), c:GetY()
+                if i == me or vis:IsRevealed(ccx, ccy) then
+                    table.insert(allCities, {x=ccx, y=ccy})
+                end
             end
         end
     end
