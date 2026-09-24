@@ -190,23 +190,49 @@ def click(*names: str, settle: float = 2.5) -> None:
         time.sleep(settle)
 
 
-def main_menu_visible() -> bool:
-    """Is the main menu actually painted? OCR, because the tuner binds long before it.
+def screen_text() -> str:
+    """OCR of the game window. Empty string if the window is gone or capture fails.
 
-    Measured 2026-09-24: the tuner accepts connections ~21 s after launch, but the
-    menu renders well after that. A blind sleep before clicking put the clicks on the
-    intro splash and the reload silently did nothing.
+    The keeper navigates on SCREEN state, not on tuner state. Measured 2026-09-24:
+    polling game_state() every 8 s through a load opened ~30 tuner handshakes during
+    a state transition and wedged the tuner, which put the keeper in a
+    load -> wedge -> recycle loop of its own making. Upstream's README says the same
+    thing from the other side: the tuner hangs after a bad handshake and does not
+    recover without a process recycle. So: look at the screen, and touch the tuner
+    once, at the end, to confirm.
     """
     try:
         sys.path.insert(0, str(REPO / "audit"))
         from shot import shoot as _shoot  # type: ignore
 
-        tmp = "/tmp/civsim_keeper_menu.png"
+        tmp = "/tmp/civsim_keeper_screen.png"
         _shoot(tmp)
-        out = sh(["tesseract", tmp, "-"], timeout=45)
-        return "Single Player" in out
+        return sh(["tesseract", tmp, "-"], timeout=45)
     except BaseException:
+        return ""
+
+
+def main_menu_visible() -> bool:
+    return "Single Player" in screen_text()
+
+
+def continue_splash_visible() -> bool:
+    return "CONTINUE GAME" in screen_text().upper()
+
+
+IN_GAME_MARKERS = ("WORLD TRACKER", "CHOOSE RESEARCH", "MELEE STRENGTH", "MOVEMENT")
+
+
+def in_game_visible() -> bool:
+    t = screen_text()
+    up = t.upper()
+    if "SINGLE PLAYER" in up or "CONTINUE GAME" in up:
         return False
+    import re as _re
+
+    if _re.search(r"TURN\s*\d+\s*/\s*\d+", up):
+        return True
+    return any(m in up for m in IN_GAME_MARKERS)
 
 
 def launch() -> None:
@@ -266,18 +292,21 @@ def budget_remaining() -> float | None:
         return None
 
 
-async def _await_in_game(timeout: float, tick: float = 8.0) -> bool:
-    """Async poll for an in-game state.
+async def _await_in_game(timeout: float, tick: float = 10.0) -> bool:
+    """Wait for the game to be visibly in progress, then confirm ONCE on the tuner.
 
-    This must NOT go through wait_for(): heal() already runs inside an event loop,
-    and asyncio.run() from there raises "cannot be called from a running event loop"
-    — which silently turned every reload into a reported failure.
+    Deliberately screen-first. The previous version polled game_state() every 8 s,
+    which is ~30 tuner handshakes across a load, and that is what kept wedging the
+    tuner. One connection at the end is enough to confirm what the screen already says.
+
+    Not via wait_for(): heal() runs inside an event loop and asyncio.run() from there
+    raises "cannot be called from a running event loop".
     """
     end = time.time() + timeout
     while time.time() < end:
-        st = await game_state()
-        if st.get("state") == "in_game":
-            return True
+        if in_game_visible():
+            st = await game_state()
+            return st.get("state") == "in_game"
         await asyncio.sleep(tick)
     return False
 
@@ -323,10 +352,16 @@ async def heal(log) -> str:
     time.sleep(3)
     click("first_save")
     click("load_button", settle=6)
-    time.sleep(35)
-    click("continue", settle=8)
 
-    ok = await _await_in_game(240, tick=8)
+    # The post-load civ splash appears whenever it appears. Wait for it by name and
+    # click it; if it never shows, carry on — some paths skip it.
+    if wait_for(continue_splash_visible, 180, tick=6):
+        log("continue splash up; dismissing")
+        click("continue", settle=8)
+    else:
+        log("no continue splash seen; proceeding")
+
+    ok = await _await_in_game(300, tick=10)
     return action + ("+reloaded" if ok else "+reload_failed")
 
 
