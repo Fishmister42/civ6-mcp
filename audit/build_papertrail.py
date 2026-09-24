@@ -148,6 +148,20 @@ def main() -> None:
     action_tools = sorted({r["tool"] for r in applied if not r["tool"].startswith("get_")})
     all_tools = sorted({r["tool"] for r in calls})
 
+    # The GAME's turn is not the same as the number of turns the agent played. A reload
+    # rewinds the game to the last checkpoint while the record keeps every turn that was
+    # played, so after a few restarts the two diverge — the page said "85 turns" while the
+    # game sat at 76. Showing only the first is quietly misleading, so show both.
+    game_turns: list[int] = []
+    for c in calls:
+        if c["tool"] != "end_turn" or c.get("verdict") != "applied":
+            continue
+        m = re.search(r"Turn\s+(\d+)\s*->\s*(\d+)", c.get("result_head") or "")
+        if m:
+            game_turns.append(int(m.group(2)))
+    game_turn_now = max(game_turns) if game_turns else None
+    game_turn_span = (min(game_turns), max(game_turns)) if game_turns else None
+
     summary = {}
     sp = RUN / "summary.json"
     if sp.exists():
@@ -183,11 +197,21 @@ def main() -> None:
     A("</header>")
 
     # ---- stats --------------------------------------------------------------
-    A('<p class="order-note">Newest turn first \u2014 scroll down for earlier turns. '
-      'Within a turn, steps run in the order the agent issued them.</p>')
+    note = (
+        "Newest turn first \u2014 scroll down for earlier turns. Within a turn, steps run "
+        "in the order the agent issued them."
+    )
+    if game_turn_span and game_turn_span[0] != game_turn_span[1]:
+        note += (
+            f" Section numbers count TURNS THE AGENT PLAYED; the game itself reached turn "
+            f"{game_turn_span[1]}. They differ because a reload rewinds the game to its "
+            f"last checkpoint while the record keeps every turn that was played."
+        )
+    A(f'<p class="order-note">{note}</p>')
     A('<section class="stats" aria-label="Run totals">')
     for n, label in [
-        (len(ended), "turns ended"),
+        (game_turn_now if game_turn_now is not None else "—", "game turn reached"),
+        (len(ended), "agent turns played"),
         (len(calls), "tool calls"),
         (len(applied), "applied"),
         (len(all_tools), "distinct tools"),
