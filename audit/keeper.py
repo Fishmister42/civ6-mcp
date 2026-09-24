@@ -216,8 +216,55 @@ def main_menu_visible() -> bool:
     return "Single Player" in screen_text()
 
 
+# The splash's own button is UNREADABLE to OCR. Measured 2026-09-24: tesseract
+# returns nothing at all below y~1050 on this screen — the "CONTINUE GAME" banner is
+# stylised text on a ribbon — so a detector looking for that string is False forever,
+# and the keeper sat on a splash it could not see through four separate "fixes".
+# Detect the splash by the body copy, which reads fine, and dismiss it by acting
+# rather than by aiming at a button whose position moves with the panel width.
+SPLASH_MARKERS = ("JOINS THE", "A UNIQUE LAND UNIT", "FEATURES & ABILITIES")
+
+
 def continue_splash_visible() -> bool:
-    return "CONTINUE GAME" in screen_text().upper()
+    up = screen_text().upper()
+    return any(m in up for m in SPLASH_MARKERS)
+
+
+def dismiss_splash() -> bool:
+    """Clear the post-load civ splash. Returns True if the screen changed.
+
+    Tries keyboard first (no coordinates to get wrong), then a short row of candidate
+    click positions along the button's band. The button sits under the left text panel
+    whose width varies by civ, so a single fixed x that worked for one leader missed
+    for another.
+    """
+    wid = sh(["xdotool", "search", "--name", "^Civilization VI$"]).split()
+    if not wid:
+        return False
+    w = wid[-1]
+    for key in ("Return", "space", "Escape"):
+        try:
+            subprocess.run(["xdotool", "key", "--window", w, key],
+                           capture_output=True, timeout=45)
+        except Exception:
+            pass
+        time.sleep(4)
+        if not continue_splash_visible():
+            return True
+    try:
+        subprocess.run(["xdotool", "windowactivate", w], capture_output=True, timeout=45)
+    except Exception:
+        pass
+    for x in (478, 495, 573, 640):
+        try:
+            subprocess.run(["xdotool", "mousemove", str(x), "1158", "click", "1"],
+                           capture_output=True, timeout=45)
+        except Exception:
+            pass
+        time.sleep(5)
+        if not continue_splash_visible():
+            return True
+    return False
 
 
 IN_GAME_MARKERS = ("WORLD TRACKER", "CHOOSE RESEARCH", "MELEE STRENGTH", "MOVEMENT")
@@ -233,7 +280,7 @@ def _looks_in_game(up: str) -> bool:
 
 def in_game_visible() -> bool:
     up = screen_text().upper()
-    if "SINGLE PLAYER" in up or "CONTINUE GAME" in up:
+    if "SINGLE PLAYER" in up or any(m in up for m in SPLASH_MARKERS):
         return False
     return _looks_in_game(up)
 
@@ -316,9 +363,9 @@ async def _await_in_game(timeout: float, tick: float = 10.0) -> bool:
     while time.time() < end:
         txt = screen_text()
         up = txt.upper()
-        if "CONTINUE GAME" in up:
+        if any(m in up for m in SPLASH_MARKERS):
             dismissed += 1
-            click("continue", settle=8)
+            dismiss_splash()
             await asyncio.sleep(tick)
             continue
         if "SINGLE PLAYER" not in up and _looks_in_game(up):
