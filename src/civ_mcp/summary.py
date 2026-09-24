@@ -129,6 +129,26 @@ async def build_game_summary(gs, concise: bool = False) -> str:
     section("GOVERNMENT", "policies", nr.narrate_policies)
     section("CITIES & PRODUCTION", "cities", lambda v: nr.narrate_cities(*v))
     section("OUR UNITS", "units", nr.narrate_units)
+
+    # Settlers and Builders decide the early game and were getting lost in a long unit
+    # list — the owner reported not always seeing a settler in the summary at all. Hoist
+    # them out by name so they cannot be missed regardless of how the list is capped.
+    units = results.get("units")
+    if not isinstance(units, Exception) and units:
+        key = []
+        for u in units:
+            t = (getattr(u, "unit_type", "") or "").upper()
+            if "SETTLER" in t or "BUILDER" in t:
+                key.append(
+                    f"  {getattr(u, 'unit_type', '?')} at "
+                    f"({getattr(u, 'x', '?')},{getattr(u, 'y', '?')}) "
+                    f"id={getattr(u, 'unit_id', getattr(u, 'id', '?'))} "
+                    f"moves={getattr(u, 'moves', '?')}"
+                )
+        out.append(
+            "\n-- SETTLERS & BUILDERS (never truncated) --\n"
+            + ("\n".join(key) if key else "  none — build a Settler if you want to expand")
+        )
     section("RESOURCES", "resources", nr.narrate_empire_resources)
     section("DIPLOMACY", "diplomacy", nr.narrate_diplomacy)
 

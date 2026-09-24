@@ -94,9 +94,39 @@ _SETTLE_SCORE_BODY = """
                             end
                         end
                     end
+                    -- Water classification drives BOTH ordering and admissibility.
+                    -- A Civ VI city with no fresh water and no aqueduct route is capped at
+                    -- 3 housing and never grows; recommending one is bad advice, not merely
+                    -- lower-scoring advice, so those sites are dropped rather than ranked.
+                    -- Aqueduct eligibility: city centre adjacent to River, Lake, Oasis or
+                    -- Mountain (Civ VI's own rule).
                     local waterType = "none"
                     if cPlot:IsFreshWater() then waterType = "fresh"
                     elseif cPlot:IsCoastalLand() then waterType = "coast" end
+                    local aqueduct = false
+                    if waterType ~= "fresh" then
+                        for ady = -1, 1 do
+                            for adx = -1, 1 do
+                                if (adx ~= 0 or ady ~= 0)
+                                   and Map.GetPlotDistance(cx, cy, cx+adx, cy+ady) == 1 then
+                                    local ap = Map.GetPlot(cx + adx, cy + ady)
+                                    if ap then
+                                        if ap:IsRiver() or ap:IsMountain() then aqueduct = true end
+                                        local okL, isLake = pcall(function() return ap:IsLake() end)
+                                        if okL and isLake then aqueduct = true end
+                                        local fi = ap:GetFeatureType()
+                                        if fi >= 0 then
+                                            local fe = GameInfo.Features[fi]
+                                            if fe and fe.FeatureType == "FEATURE_OASIS" then
+                                                aqueduct = true
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    local waterOk = (waterType == "fresh") or (waterType == "coast") or aqueduct
                     local defScore = 0
                     if cPlot:IsHills() then defScore = defScore + 2 end
                     if cPlot:IsRiver() then defScore = defScore + 1 end
@@ -108,9 +138,15 @@ _SETTLE_SCORE_BODY = """
                             end
                         end
                     end
+                    -- Fresh water DOMINATES. It was +5 on a score where food and
+                    -- production routinely total 50+, i.e. a rounding error, and the
+                    -- advisor duly sent settlers to dry high-yield tiles that could never
+                    -- grow. Housing is the binding constraint in the early game, so the
+                    -- water tier is now worth more than any yield difference can overcome.
                     local score = totalF * 2 + totalP * 2 + totalG + luxCount * 4 + stratCount * 3 + defScore
-                    if waterType == "fresh" then score = score + 5
-                    elseif waterType == "coast" then score = score + 3 end
+                    if waterType == "fresh" then score = score + 120
+                    elseif waterType == "coast" then score = score + 60
+                    elseif aqueduct then score = score + 40 end
                     local friendlyP, enemyP = 1.0, 0
                     for pi = 0, 62 do
                         local pp = Players[pi]
@@ -137,7 +173,11 @@ _SETTLE_SCORE_BODY = """
                     if loyPT < -20 then loyPT = -20 end
                     if loyPT > 20 then loyPT = 20 end
                     if loyPT < 0 then score = score + loyPT * 2 end
-                    table.insert(candidates, {x=cx, y=cy, score=score, f=totalF, p=totalP, water=waterType, def=defScore, res=table.concat(resList, ","), loy=loyPT})
+                    if waterOk then
+                        local wLabel = waterType
+                        if waterType == "none" and aqueduct then wLabel = "aqueduct" end
+                        table.insert(candidates, {x=cx, y=cy, score=score, f=totalF, p=totalP, water=wLabel, def=defScore, res=table.concat(resList, ","), loy=loyPT})
+                    end
                 end
 """
 
