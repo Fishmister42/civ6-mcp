@@ -68,6 +68,8 @@ def collect_shots() -> dict[int, list[tuple[str, str]]]:
     return out
 
 
+REFLECTION_FIELDS = ("tactical", "strategic", "tooling", "planning", "hypothesis")
+
 VERDICT_LABEL = {
     "applied": "applied",
     "engine_refused": "refused by engine",
@@ -170,10 +172,33 @@ def main() -> None:
                     A(f'<blockquote class="think">{html.escape(txt)}</blockquote>')
             elif s["kind"] == "tool_call":
                 v = s.get("verdict") or ("applied" if s.get("ok") else "mcp_error")
+                args = s.get("args") or {}
+                # end_turn carries the agent's own turn-level reasoning in five fields.
+                # That prose is the paper trail, so give it its own block rather than
+                # crushing it into an argument list.
+                refl = None
+                if s["tool"] == "end_turn" and any(
+                    args.get(k) for k in REFLECTION_FIELDS
+                ):
+                    refl = {k: args.get(k, "") for k in REFLECTION_FIELDS}
+                    args = {}
+                if refl:
+                    A('<div class="reflect">')
+                    A('<p class="rlabel">The agent\u2019s own account of this turn</p>')
+                    A("<dl>")
+                    for k in REFLECTION_FIELDS:
+                        val = (refl.get(k) or "").strip()
+                        if val:
+                            A(
+                                f"<div><dt>{html.escape(k)}</dt>"
+                                f"<dd>{html.escape(val)}</dd></div>"
+                            )
+                    A("</dl>")
+                    A("</div>")
                 A(f'<div class="step {html.escape(v)}">')
                 A(
                     f'<code class="cmd">{html.escape(s["tool"])}'
-                    f'<span class="args">{html.escape(fmt_args(s.get("args") or {}))}</span></code>'
+                    f'<span class="args">{html.escape(fmt_args(args))}</span></code>'
                 )
                 A(
                     f'<span class="chip">{html.escape(VERDICT_LABEL.get(v, v))}'
@@ -251,6 +276,14 @@ h1{font-family:"Spectral",Georgia,serif;font-weight:600;font-size:clamp(2rem,6vw
 .shot img{display:block;width:100%;max-width:100%;border:1px solid var(--rule);border-radius:3px;}
 .shot figcaption{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.66rem;
   letter-spacing:.08em;text-transform:uppercase;color:var(--ink-soft);margin-top:.45rem;}
+.reflect{background:var(--bronze-soft);border:1px solid var(--rule);border-left:3px solid var(--bronze);
+  border-radius:3px;padding:.85rem 1rem;margin:0 0 .6rem;}
+.rlabel{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.62rem;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--bronze);margin:0 0 .6rem;}
+.reflect dl{margin:0;display:grid;gap:.55rem;}
+.reflect dt{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.6rem;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--ink-soft);margin-bottom:.1rem;}
+.reflect dd{margin:0;font-family:"Spectral",Georgia,serif;font-size:.97rem;line-height:1.5;}
 .think{margin:0 0 .9rem;padding:.2rem 0 .2rem 1rem;border-left:2px solid var(--bronze);
   font-family:"Spectral",Georgia,serif;font-size:1.02rem;color:var(--ink);}
 .step{background:var(--panel);border:1px solid var(--rule);border-radius:3px;
