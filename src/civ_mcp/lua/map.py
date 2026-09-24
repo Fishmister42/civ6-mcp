@@ -379,14 +379,25 @@ local x, y = unit:GetX(), unit:GetY()
 local plot = Map.GetPlot(x, y)
 if plot:IsWater() then {_bail("ERR:CANNOT_FOUND|Cannot found city on water")} end
 if plot:IsMountain() then {_bail("ERR:CANNOT_FOUND|Cannot found city on mountain")} end
+local me = Game.GetLocalPlayer()
+local myVis = PlayersVisibility[me]
 for i = 0, 62 do
     if Players[i] and Players[i]:IsAlive() then
         local cities = Players[i]:GetCities()
         if cities then
             for _, c in cities:Members() do
-                local dist = Map.GetPlotDistance(x, y, c:GetX(), c:GetY())
+                local cx, cy = c:GetX(), c:GetY()
+                local dist = Map.GetPlotDistance(x, y, cx, cy)
                 if dist <= 3 then
-                    {_bail_lua('"ERR:CANNOT_FOUND|Too close to " .. Locale.Lookup(c:GetName()) .. " (settler at " .. x .. "," .. y .. ", distance " .. dist .. ", need > 3)"')}
+                    -- spec-005 R5: the refusal itself is fine — a human learns "too
+                    -- close" from the greyed-out Found City button. NAMING a city the
+                    -- player has never seen is not: it discloses the existence and the
+                    -- name of an unseen settlement. Redact unless it is ours or revealed.
+                    local shownName = "another city"
+                    if i == me or myVis:IsRevealed(cx, cy) then
+                        shownName = Locale.Lookup(c:GetName())
+                    end
+                    {_bail_lua('"ERR:CANNOT_FOUND|Too close to " .. shownName .. " (settler at " .. x .. "," .. y .. ", distance " .. dist .. ", need > 3)"')}
                 end
             end
         end
