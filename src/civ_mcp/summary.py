@@ -52,7 +52,36 @@ async def _safe(label: str, coro) -> tuple[str, Any]:
         return label, RuntimeError(f"{type(exc).__name__}: {exc}")
 
 
-async def build_game_summary(gs) -> str:
+#: Per-section line caps for concise mode. Research & Civics and Government are 72% of the
+#: full payload and the least dynamic part of it — the available-tech list barely moves
+#: turn to turn — so they take the hard caps. TURN BLOCKERS is never capped: it is the one
+#: section that must be acted on, and truncating it would defeat the point of hoisting it.
+_CONCISE_CAPS = {
+    "RESEARCH & CIVICS (current + available only)": 8,
+    "GOVERNMENT": 8,
+    "DIPLOMACY": 14,
+    "CITIES & PRODUCTION": 16,
+    "OUR UNITS": 16,
+    "STATE": 12,
+    "RESOURCES": 6,
+    "VISIBLE FOREIGN UNITS": 12,
+}
+
+
+def _cap(title: str, body: str, concise: bool) -> str:
+    if not concise:
+        return body
+    limit = _CONCISE_CAPS.get(title)
+    if limit is None:
+        return body
+    lines = body.splitlines()
+    if len(lines) <= limit:
+        return body
+    hidden = len(lines) - limit
+    return "\n".join(lines[:limit]) + f"\n  ... +{hidden} more (call the specific tool for full detail)"
+
+
+async def build_game_summary(gs, concise: bool = False) -> str:
     """One turn-start read covering everything dynamic a decision needs.
 
     Sections degrade independently: `get_game_overview` in particular is flaky on this host
@@ -80,7 +109,9 @@ async def build_game_summary(gs) -> str:
         k, v = await _safe(label, factory())
         results[k] = v
 
-    out: list[str] = ["=== TURN SUMMARY ==="]
+    out: list[str] = [
+        "=== TURN SUMMARY (auto) ===" if concise else "=== TURN SUMMARY ==="
+    ]
 
     def section(title: str, key: str, render) -> None:
         val = results.get(key)
@@ -91,7 +122,7 @@ async def build_game_summary(gs) -> str:
             body = render(val)
         except Exception as exc:  # noqa: BLE001
             body = f"  (could not render: {type(exc).__name__}: {exc})"
-        out.append(f"\n-- {title} --\n{body}")
+        out.append(f"\n-- {title} --\n{_cap(title, body, concise)}")
 
     section("STATE", "overview", nr.narrate_overview)
     section("RESEARCH & CIVICS (current + available only)", "tech", nr.narrate_tech_civics)

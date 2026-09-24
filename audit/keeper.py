@@ -30,6 +30,7 @@ import argparse
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -38,6 +39,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 SECRETS = Path("/home/matt/CivSolver/secrets.yaml")
 SAVE_NAME = "KEEPER"  # short on purpose: long names truncate in the load list UI
+SAVE_DIR = (
+    Path.home() / ".local/share/aspyr-media/Sid Meier's Civilization VI/Saves/Single"
+)
 STEAM_APPID = "289070"
 
 # Menu coordinates, 1920x1200 window at 0,0. Measured 2026-09-24. Their OCR menu
@@ -49,6 +53,14 @@ CLICK = {
     "first_save": (628, 298),
     "load_button": (640, 1149),
     "continue": (573, 1131),
+    # Create Game path, measured 2026-09-24 while building the first Cyrus seed by hand.
+    "create_game": (1089, 833),
+    "advanced_setup": (959, 1088),
+    "load_configuration": (330, 1159),
+    "preset_first": (620, 217),
+    "load_config_button": (640, 1148),
+    "leader_dropdown": (715, 240),
+    "start_game": (1485, 1164),
 }
 
 
@@ -335,6 +347,55 @@ def in_game_visible() -> bool:
     return _looks_in_game(up)
 
 
+def new_game_same_config(log) -> bool:
+    """Start a FRESH game from the CivSim DEFAULT preset with Cyrus in the human slot.
+
+    Same configuration, new map seed — the owner's experiment design: run to a turn
+    ceiling, then reseed rather than play one game forever, so results are comparable
+    across runs instead of being one long anecdote.
+
+    Drives the Create Game UI because the preset deliberately does NOT pin a leader (every
+    slot reads "Random Leader"), and the Lua write at the setup state could not be reached
+    on this host. The leader list is alphabetical and scrolled by a measured amount; the
+    caller VERIFIES identity afterwards rather than trusting these clicks.
+    """
+    if not wait_for(main_menu_visible, 300, tick=6):
+        log("reseed: no main menu")
+        return False
+    log("reseed: Create Game -> Advanced Setup -> load CivSim DEFAULT")
+    click("single_player"); time.sleep(2)
+    click("create_game", settle=5)
+    click("advanced_setup", settle=4)
+    click("load_configuration", settle=4)
+    click("preset_first", settle=3)
+    click("load_config_button", settle=7)
+
+    log("reseed: selecting Cyrus in the human slot")
+    click("leader_dropdown", settle=3)
+    wid = sh(["xdotool", "search", "--name", "^Civilization VI$"]).split()
+    if wid:
+        w = wid[-1]
+        try:
+            subprocess.run(["xdotool", "windowactivate", w], capture_output=True, timeout=30)
+            subprocess.run(["xdotool", "mousemove", "390", "600"], capture_output=True, timeout=30)
+            for _ in range(6):  # past Cyrus
+                subprocess.run(["xdotool", "click", "5"], capture_output=True, timeout=20)
+                time.sleep(0.3)
+            for _ in range(3):  # back up onto him
+                subprocess.run(["xdotool", "click", "4"], capture_output=True, timeout=20)
+                time.sleep(0.3)
+            time.sleep(2)
+            subprocess.run(["xdotool", "mousemove", "335", "331", "click", "1"],
+                           capture_output=True, timeout=30)
+        except Exception as exc:  # noqa: BLE001
+            log(f"reseed: leader selection failed ({exc})")
+            return False
+    time.sleep(3)
+    log("reseed: Start Game")
+    click("start_game", settle=10)
+    return True
+
+
 def launch() -> None:
     subprocess.Popen(
         ["setsid", "steam", f"steam://rungameid/{STEAM_APPID}"],
@@ -530,6 +591,9 @@ async def main() -> int:
     ap.add_argument("--turns-per-block", type=int, default=12)
     ap.add_argument("--model", default="z-ai/glm-5.3-flash")
     ap.add_argument("--max-cycles", type=int, default=0, help="0 = until stopped")
+    ap.add_argument("--reseed-at", type=int, default=0,
+                    help="when the game reaches this turn, archive it and start a fresh "
+                         "seed on the same configuration (0 = never)")
     ap.add_argument("--budget-floor", type=float, default=0.25,
                     help="stop when OpenRouter credit falls below this")
     args = ap.parse_args()
@@ -599,6 +663,34 @@ async def main() -> int:
             log(f"cannot reach an in-game state ({st}) - retrying next cycle")
             record(kind="cycle", cycle=cycle, healed=healed, state=st, played=None)
             time.sleep(30)
+            continue
+
+        # Turn ceiling: reseed rather than play one game indefinitely.
+        turn_now = st.get("turn") or 0
+        if args.reseed_at and turn_now >= args.reseed_at:
+            log(f"cycle {cycle}: turn {turn_now} >= reseed ceiling {args.reseed_at} - "
+                f"archiving and starting a fresh seed on the same configuration")
+            archive = SAVE_DIR / f"CYRUS-seed-t{turn_now}-{time.strftime('%H%M%S')}.Civ6Save"
+            try:
+                shutil.copy2(SAVE_DIR / f"{SAVE_NAME}.Civ6Save", archive)
+                log(f"cycle {cycle}: archived finished game to {archive.name}")
+            except Exception as exc:  # noqa: BLE001
+                log(f"cycle {cycle}: archive failed ({exc}) - reseeding anyway")
+            recycle()
+            if new_game_same_config(log) and await _await_in_game(600, tick=10):
+                fresh = await game_state()
+                log(f"cycle {cycle}: reseeded -> turn {fresh.get('turn')} "
+                    f"as {fresh.get('leader')}")
+                record(kind="reseed", cycle=cycle, from_turn=turn_now,
+                       new_turn=fresh.get("turn"), leader=fresh.get("leader"),
+                       archived=archive.name)
+                if fresh.get("leader") != EXPECT_LEADER:
+                    log(f"cycle {cycle}: reseed produced {fresh.get('leader')} - "
+                        "NOT reseeding again this run, reloading instead")
+                    args.reseed_at = 0
+            else:
+                log(f"cycle {cycle}: reseed failed - retrying next cycle")
+                record(kind="reseed_failed", cycle=cycle, from_turn=turn_now)
             continue
 
         log(f"cycle {cycle}: checkpointing")

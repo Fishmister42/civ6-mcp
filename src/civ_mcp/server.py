@@ -576,7 +576,7 @@ async def get_game_overview(ctx: Context) -> str:
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
-async def get_game_summary(ctx: Context) -> str:
+async def get_game_summary(ctx: Context, concise: bool = False) -> str:
     """EVERYTHING dynamic you need to decide a turn, in one call. Start every turn here.
 
     Replaces calling get_game_overview + get_units + get_cities + get_tech_civics +
@@ -589,11 +589,20 @@ async def get_game_summary(ctx: Context) -> str:
     You need what changed, not the rulebook. Call the specific tool when you want depth on
     one thing.
 
+    Args:
+        concise: cap the long, slow-moving sections (research/civics, government) and mark
+            what was trimmed. The harness injects a concise summary automatically at the
+            start of every turn; call this yourself with concise=False when you want the
+            uncapped version.
+
     Sections degrade independently: if one is unavailable the rest still arrive.
     """
     gs = _get_game(ctx)
     return await _logged(
-        ctx, "get_game_summary", {}, lambda: civ_summary.build_game_summary(gs)
+        ctx,
+        "get_game_summary",
+        {"concise": concise},
+        lambda: civ_summary.build_game_summary(gs, concise=concise),
     )
 
 

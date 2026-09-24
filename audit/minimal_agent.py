@@ -47,10 +47,11 @@ more than optimal play: the point is to exercise the interface across as much of
 game as you can reach.
 
 Loop, every turn:
-  1. get_game_summary to orient. ONE call gives you yields, research, government, every
-     city and its production, every unit, visible foreign units, resources, diplomacy, and
-     anything blocking end_turn. Do not call get_game_overview / get_units / get_cities /
-     get_tech_civics separately unless you need depth on one of them.
+  1. A TURN SUMMARY is dropped in for you automatically at the start of every turn. You do
+     not need to request it. It carries yields, research, government, every city and its
+     production, every unit, visible foreign units, resources, diplomacy, and anything
+     BLOCKING end_turn. Read it and act. Call get_game_summary yourself only when you want
+     the uncapped version, or a specific tool when you need depth on one thing.
   1b. get_board_screenshot when the decision is SPATIAL — where to settle, how terrain and
      borders lie, where units actually are relative to each other. You get the same view a
      human has. Use it when text is a poor substitute, not every turn.
@@ -212,6 +213,28 @@ def mcp_tools_to_openai(tools: list[Any], extra_banned: set[str]) -> list[dict[s
     return out
 
 
+async def fetch_turn_summary(session, concise: bool = True) -> str | None:
+    """Pull a concise summary through the MCP surface for automatic injection.
+
+    Harness engineering, not prompting: every turn STARTS with a summary because the
+    harness puts one there, not because the model remembered to ask. The model may still
+    call get_game_summary itself for full detail — this only guarantees the floor.
+    """
+    try:
+        res = await asyncio.wait_for(
+            session.call_tool("get_game_summary", {"concise": concise}), timeout=180
+        )
+    except Exception:
+        try:
+            res = await asyncio.wait_for(
+                session.call_tool("get_game_summary", {}), timeout=180
+            )
+        except Exception:
+            return None
+    body = "\n".join(getattr(c, "text", "") or "" for c in res.content)
+    return body or None
+
+
 async def chat(client: httpx.AsyncClient, key: str, model: str, messages, tools):
     r = await client.post(
         OPENROUTER_URL,
@@ -252,6 +275,7 @@ async def run(args) -> int:
     shots = 0
     transport_failures = 0
     calls_this_turn = 0
+    pending_summary: str | None = None
     # Repeat detector. Measured 2026-09-24: a block burned 25 consecutive end_turn calls,
     # every one engine_refused on the same Babylon diplomacy blocker, ~6 s apart, while the
     # agent narrated "diplomacy deadlock continues" each time. From outside the cycle looked
@@ -276,6 +300,9 @@ async def run(args) -> int:
             )
             print(f"[mcp] {len(listed.tools)} tools advertised, {len(tools)} exposed to the model")
 
+            opening = await fetch_turn_summary(session)
+            if opening:
+                rec.record(kind="auto_summary", turn_index=0, chars=len(opening))
             messages = [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
@@ -436,6 +463,11 @@ async def run(args) -> int:
                         if name == "end_turn" and verdict == "applied":
                             turns_ended += 1
                             calls_this_turn = 0
+                            auto = await fetch_turn_summary(session)
+                            if auto:
+                                rec.record(kind="auto_summary",
+                                           turn_index=turns_ended, chars=len(auto))
+                                pending_summary = auto
                             print(f"[turn] {turns_ended}/{args.turns} ended")
                             shoot(out, f"endturn_{turns_ended:03d}")
                             shots += 1
@@ -458,6 +490,13 @@ async def run(args) -> int:
                                      "image_url": {"url": f"data:{mime};base64,{data}"}},
                                 ],
                             })
+
+                    if pending_summary:
+                        messages.append({
+                            "role": "user",
+                            "content": f"=== START OF TURN ===\n{pending_summary}",
+                        })
+                        pending_summary = None
 
                     if calls_this_turn >= args.calls_per_turn:
                         messages.append(
