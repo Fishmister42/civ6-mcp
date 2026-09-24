@@ -223,16 +223,19 @@ def continue_splash_visible() -> bool:
 IN_GAME_MARKERS = ("WORLD TRACKER", "CHOOSE RESEARCH", "MELEE STRENGTH", "MOVEMENT")
 
 
-def in_game_visible() -> bool:
-    t = screen_text()
-    up = t.upper()
-    if "SINGLE PLAYER" in up or "CONTINUE GAME" in up:
-        return False
+def _looks_in_game(up: str) -> bool:
     import re as _re
 
     if _re.search(r"TURN\s*\d+\s*/\s*\d+", up):
         return True
     return any(m in up for m in IN_GAME_MARKERS)
+
+
+def in_game_visible() -> bool:
+    up = screen_text().upper()
+    if "SINGLE PLAYER" in up or "CONTINUE GAME" in up:
+        return False
+    return _looks_in_game(up)
 
 
 def launch() -> None:
@@ -293,20 +296,35 @@ def budget_remaining() -> float | None:
 
 
 async def _await_in_game(timeout: float, tick: float = 10.0) -> bool:
-    """Wait for the game to be visibly in progress, then confirm ONCE on the tuner.
+    """Drive whatever is on screen towards an in-game state, then confirm ONCE.
 
-    Deliberately screen-first. The previous version polled game_state() every 8 s,
-    which is ~30 tuner handshakes across a load, and that is what kept wedging the
-    tuner. One connection at the end is enough to confirm what the screen already says.
+    Deliberately screen-first. An earlier version polled game_state() every 8 s, which
+    is ~30 tuner handshakes across a load, and that is what kept wedging the tuner. One
+    connection at the end is enough to confirm what the screen already says.
+
+    It also DISMISSES the post-load civ splash whenever it turns up, rather than in a
+    separate one-shot window beforehand. Measured 2026-09-24: a slow load put the splash
+    on screen after that window had closed, so the keeper sat watching a splash it knew
+    was not in-game for five minutes without ever clicking the button in front of it.
+    A wait that can see a blocker should be able to clear it.
 
     Not via wait_for(): heal() runs inside an event loop and asyncio.run() from there
     raises "cannot be called from a running event loop".
     """
     end = time.time() + timeout
+    dismissed = 0
     while time.time() < end:
-        if in_game_visible():
+        txt = screen_text()
+        up = txt.upper()
+        if "CONTINUE GAME" in up:
+            dismissed += 1
+            click("continue", settle=8)
+            await asyncio.sleep(tick)
+            continue
+        if "SINGLE PLAYER" not in up and _looks_in_game(up):
             st = await game_state()
-            return st.get("state") == "in_game"
+            if st.get("state") == "in_game":
+                return True
         await asyncio.sleep(tick)
     return False
 
@@ -316,6 +334,14 @@ async def heal(log) -> str:
     st = await game_state()
     if st["state"] == "in_game":
         return "already_in_game"
+
+    # A cycle can begin on the post-load civ splash: the save is loaded, GameCore is
+    # not resolvable yet, so game_state() reads "menu" — and waiting for the MAIN menu
+    # from there waits for a screen that will never come. Clear the splash instead.
+    if continue_splash_visible():
+        log("cycle began on the continue splash; dismissing rather than seeking a menu")
+        if await _await_in_game(300, tick=10):
+            return "splash_dismissed"
 
     if st["state"] == "down":
         log("client down - launching")
@@ -353,15 +379,9 @@ async def heal(log) -> str:
     click("first_save")
     click("load_button", settle=6)
 
-    # The post-load civ splash appears whenever it appears. Wait for it by name and
-    # click it; if it never shows, carry on — some paths skip it.
-    if wait_for(continue_splash_visible, 180, tick=6):
-        log("continue splash up; dismissing")
-        click("continue", settle=8)
-    else:
-        log("no continue splash seen; proceeding")
-
-    ok = await _await_in_game(300, tick=10)
+    # No separate splash window: _await_in_game dismisses the splash whenever it
+    # appears, so a slow load cannot land it outside a fixed watching period.
+    ok = await _await_in_game(420, tick=10)
     return action + ("+reloaded" if ok else "+reload_failed")
 
 
