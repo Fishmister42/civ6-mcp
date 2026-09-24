@@ -271,19 +271,29 @@ if found == 0 then
     else
         print("WARN:CANNOT_START|CanStartOperation blocked all destinations.")
     end
+    -- spec-005 R4: this fallback used to enumerate EVERY city of EVERY living player,
+    -- gated only on IsAlive and not-at-war, printing name, civilization, coordinates
+    -- and yields — including cities of civilizations never met and cities never seen.
+    -- The primary path above is admissible because UnitManager.CanStartOperation is
+    -- the engine's own legality check, i.e. the game's trade-route picker. The fallback
+    -- had no such justification and fires precisely when the picker offers nothing.
+    local myDiplo = Players[me]:GetDiplomacy()
+    local myVis = PlayersVisibility[me]
     for i = 0, 62 do
-        if Players[i]:IsAlive() and i ~= 63 then
+        if Players[i] and Players[i]:IsAlive() and i ~= 63
+           and (i == me or myDiplo:HasMet(i)) then
             local atWar = false
             if i ~= me then
                 pcall(function()
-                    local pDiplo = Players[me]:GetDiplomacy()
-                    if pDiplo then atWar = pDiplo:IsAtWarWith(i) end
+                    if myDiplo then atWar = myDiplo:IsAtWarWith(i) end
                 end)
             end
             if not atWar then
                 for _, city in Players[i]:GetCities():Members() do
                     local cx, cy = city:GetX(), city:GetY()
-                    if cx ~= ux or cy ~= uy then
+                    -- own cities always; a rival's only where the plot is revealed
+                    local mayShow = (i == me) or myVis:IsRevealed(cx, cy)
+                    if (cx ~= ux or cy ~= uy) and mayShow then
                         enrichDest(i, city, cx, cy, i == me)
                     end
                 end
