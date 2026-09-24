@@ -183,6 +183,8 @@ def main() -> None:
     A("</header>")
 
     # ---- stats --------------------------------------------------------------
+    A('<p class="order-note">Newest turn first \u2014 scroll down for earlier turns. '
+      'Within a turn, steps run in the order the agent issued them.</p>')
     A('<section class="stats" aria-label="Run totals">')
     for n, label in [
         (len(ended), "turns ended"),
@@ -195,7 +197,10 @@ def main() -> None:
     A("</section>")
 
     # ---- turns --------------------------------------------------------------
-    for t in sorted(turns):
+    # Newest turn first. The page is a running log of an experiment still in progress, so
+    # the thing a reader wants is the latest state, not turn 1 again. Steps WITHIN a turn
+    # stay chronological — a turn only reads correctly forwards.
+    for t in sorted(turns, reverse=True):
         steps = turns[t]
         if not any(s["kind"] == "tool_call" for s in steps):
             continue
@@ -304,6 +309,9 @@ h1{font-family:"Spectral",Georgia,serif;font-weight:600;font-size:clamp(2rem,6vw
 .meta dt{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.66rem;
   letter-spacing:.12em;text-transform:uppercase;color:var(--ink-soft);}
 .meta dd{margin:0;font-size:.9rem;}
+.order-note{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.66rem;
+  letter-spacing:.06em;text-transform:uppercase;color:var(--ink-soft);
+  margin:0 0 .8rem;}
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(105px,1fr));gap:1px;
   background:var(--rule);border:1px solid var(--rule);border-radius:3px;
   overflow:hidden;margin-bottom:2.4rem;}
