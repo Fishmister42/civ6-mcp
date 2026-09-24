@@ -18,17 +18,38 @@ import re
 import sys
 from pathlib import Path
 
-RUN = Path(sys.argv[1])
-OUT = Path(sys.argv[2])
-MAXW = int(sys.argv[3]) if len(sys.argv) > 3 else 1000
+# Usage: build_papertrail.py <out.html> <maxw> <run dir> [<run dir> ...]
+# Several run dirs are stitched into ONE continuous story, because the keeper
+# resumes the same Cyrus game cycle after cycle and the artifact should read as
+# one experiment rather than a pile of separate runs.
+OUT = Path(sys.argv[1])
+MAXW = int(sys.argv[2])
+RUNS = [Path(a) for a in sys.argv[3:]]
+RUN = RUNS[0]
 
 
 def load_rows():
-    rows = []
-    for line in (RUN / "tool_calls.jsonl").open():
-        line = line.strip()
-        if line:
-            rows.append(json.loads(line))
+    """All rows across all runs, with a global turn index so turns keep counting up."""
+    rows, base = [], 0
+    for rd in RUNS:
+        f = rd / "tool_calls.jsonl"
+        if not f.exists():
+            continue
+        local = []
+        for line in f.open():
+            line = line.strip()
+            if line:
+                r = json.loads(line)
+                r["_run"] = rd.name
+                r["turns_ended"] = r.get("turns_ended", 0) + base
+                local.append(r)
+        rows.extend(local)
+        ended = [
+            r for r in local
+            if r["kind"] == "tool_call" and r["tool"] == "end_turn"
+            and r.get("verdict") == "applied"
+        ]
+        base += len(ended)
     return rows
 
 
@@ -48,24 +69,37 @@ def shot_data_uri(p: Path, maxw: int = MAXW, quality: int = 72) -> str | None:
 
 
 def collect_shots() -> dict[int, list[tuple[str, str]]]:
-    """turn index -> [(label, data uri)]"""
+    """turn index -> [(label, data uri)], across every run, offset the same way."""
     out: dict[int, list[tuple[str, str]]] = {}
-    d = RUN / "shots"
+    base = 0
+    for rd in RUNS:
+        _collect_one(rd, out, base)
+        f = rd / "tool_calls.jsonl"
+        if f.exists():
+            base += sum(
+                1 for l in f.open()
+                if l.strip() and (json.loads(l).get("tool") == "end_turn"
+                                  and json.loads(l).get("verdict") == "applied")
+            )
+    return out
+
+
+def _collect_one(rd: Path, out: dict, base: int) -> None:
+    d = rd / "shots"
     if not d.is_dir():
-        return out
+        return
     for p in sorted(d.glob("*.png")):
         m = re.match(r"endturn_(\d+)", p.stem)
         if m:
-            turn = int(m.group(1))
+            turn = int(m.group(1)) + base
             label = f"end of turn {turn}"
         else:
             m2 = re.match(r"t(\d+)_s(\d+)", p.stem)
-            turn = int(m2.group(1)) if m2 else 0
+            turn = (int(m2.group(1)) if m2 else 0) + base
             label = f"during turn {turn + 1}"
         uri = shot_data_uri(p)
         if uri:
             out.setdefault(turn, []).append((label, uri))
-    return out
 
 
 REFLECTION_FIELDS = ("tactical", "strategic", "tooling", "planning", "hypothesis")
@@ -220,7 +254,7 @@ def main() -> None:
     OUT.write_text("\n".join(P), encoding="utf-8")
     kb = OUT.stat().st_size / 1024
     print(f"wrote {OUT} ({kb:.0f} KB) — {len(ended)} turns, {len(calls)} calls, "
-          f"{sum(len(v) for v in shots.values())} shots")
+          f"{sum(len(v) for v in shots.values())} shots, across {len(RUNS)} run(s)")
 
 
 STYLE = """<style>
