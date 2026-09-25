@@ -44,12 +44,28 @@ _NOT_IN_GAME = ("SINGLE PLAYER", "LOAD GAME", "JOINS THE", "MAIN MENU")
 _CONTAMINANTS = ("FIRETUNER", "FIRE TUNER", "TUNER", "LUA CONSOLE", "DEBUG MENU")
 
 
-async def _safe(label: str, coro) -> tuple[str, Any]:
-    """Run one sub-query; a failure degrades the section, never the whole summary."""
-    try:
-        return label, await asyncio.wait_for(coro, timeout=60)
-    except Exception as exc:  # noqa: BLE001
-        return label, RuntimeError(f"{type(exc).__name__}: {exc}")
+async def _safe(label: str, factory, attempts: int = 3) -> tuple[str, Any]:
+    """Run one sub-query with retries; a failure degrades the section, never the summary.
+
+    Retries because get_game_overview in particular raises rather than retrying when the
+    tuner returns nothing ("Empty overview response", or the FireTuner status string
+    "Resolving Buffered Parameters" reaching a parser that wants 14 fields). It is the
+    section carrying "Cities: N", so its intermittent failure is exactly the
+    "problems getting city count" the owner reported: the number does not go wrong, it
+    disappears.
+
+    Takes a FACTORY rather than a coroutine — a coroutine can only be awaited once, so a
+    retry needs a fresh one.
+    """
+    last: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return label, await asyncio.wait_for(factory(), timeout=60)
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            if attempt + 1 < attempts:
+                await asyncio.sleep(1.5)
+    return label, RuntimeError(f"{type(last).__name__}: {last}")
 
 
 #: Per-section line caps for concise mode. Research & Civics and Government are 72% of the
@@ -106,7 +122,7 @@ async def build_game_summary(gs, concise: bool = False) -> str:
         ("threats", gs.get_threat_scan),
         ("sessions", gs.get_diplomacy_sessions),
     ):
-        k, v = await _safe(label, factory())
+        k, v = await _safe(label, factory)
         results[k] = v
 
     out: list[str] = [
@@ -124,7 +140,32 @@ async def build_game_summary(gs, concise: bool = False) -> str:
             body = f"  (could not render: {type(exc).__name__}: {exc})"
         out.append(f"\n-- {title} --\n{_cap(title, body, concise)}")
 
-    section("STATE", "overview", nr.narrate_overview)
+    # STATE carries the headline counts. If it is unavailable after retries, derive what
+    # we can from sections that DID succeed rather than leaving the agent with no city
+    # count at all — a missing number reads as "no cities" to a model skimming for one.
+    if isinstance(results.get("overview"), Exception):
+        derived = []
+        cres = results.get("cities")
+        if not isinstance(cres, Exception) and cres:
+            clist = cres[0] if isinstance(cres, tuple) else cres
+            try:
+                derived.append(f"Cities: {len(list(clist))} (derived — overview unavailable)")
+            except Exception:  # noqa: BLE001
+                pass
+        ures = results.get("units")
+        if not isinstance(ures, Exception) and ures is not None:
+            try:
+                derived.append(f"Units: {len(list(ures))} (derived)")
+            except Exception:  # noqa: BLE001
+                pass
+        out.append(
+            "\n-- STATE --\n  (overview unavailable: "
+            f"{results['overview']})\n"
+            + ("\n".join(f"  {d}" for d in derived) if derived
+               else "  no counts could be derived")
+        )
+    else:
+        section("STATE", "overview", nr.narrate_overview)
     section("RESEARCH & CIVICS (current + available only)", "tech", nr.narrate_tech_civics)
     section("GOVERNMENT", "policies", nr.narrate_policies)
     section("CITIES & PRODUCTION", "cities", lambda v: nr.narrate_cities(*v))
